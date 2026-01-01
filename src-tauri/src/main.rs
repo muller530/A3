@@ -9,6 +9,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::set_feishu_credentials,
             commands::get_feishu_access_token,
+            commands::test_feishu_connection,
             commands::get_bitable_tables,
             commands::get_answers_data,
             commands::list_answers,

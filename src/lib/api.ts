@@ -1,5 +1,4 @@
 import { invoke } from "@tauri-apps/api/core";
-import { testFeishuConnection } from "./feishuClient";
 
 export interface FeishuCredentials {
   app_id: string;
@@ -103,12 +102,26 @@ export function loadFeishuConfig(): Partial<FeishuConfig> | null {
   };
 }
 
-// 测试飞书连接
+// 测试飞书连接（通过后端）
 export async function testConnection(
   appId: string,
   appSecret: string
 ): Promise<{ success: boolean; message: string; token?: string }> {
-  return await testFeishuConnection(appId, appSecret);
+  try {
+    const result = await invoke<string>("test_feishu_connection", {
+      appId,
+      appSecret,
+    });
+    return {
+      success: true,
+      message: result,
+    };
+  } catch (error: any) {
+    return {
+      success: false,
+      message: error?.toString() || "连接测试失败",
+    };
+  }
 }
 
 // 获取飞书 access token（从后端缓存获取）

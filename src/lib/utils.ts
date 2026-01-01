@@ -445,3 +445,37 @@ export function parseRiskCheckResult(checkText: string): RiskCheckResult {
   };
 }
 
+/**
+ * 校验 feishu_record_id 是否合法
+ * 合法条件：
+ * 1. 存在且非空
+ * 2. 以 "rec" 开头
+ * 
+ * @param recordId 待校验的记录ID
+ * @returns 是否合法
+ */
+export function isValidFeishuRecordId(recordId: string | null | undefined): boolean {
+  if (!recordId || typeof recordId !== "string") {
+    return false;
+  }
+  return recordId.trim().startsWith("rec");
+}
+
+/**
+ * 获取 feishu_record_id（从 Answer 对象中）
+ * 确保返回的是合法的飞书记录ID
+ * 
+ * @param answer Answer 对象
+ * @returns feishu_record_id 或 null
+ */
+export function getFeishuRecordId(answer: { record_id: string } | null | undefined): string | null {
+  if (!answer || !answer.record_id) {
+    return null;
+  }
+  const recordId = answer.record_id.trim();
+  if (isValidFeishuRecordId(recordId)) {
+    return recordId;
+  }
+  return null;
+}
+

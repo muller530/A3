@@ -537,8 +537,28 @@ pub async fn optimize_answer_with_ai(
     context: Option<String>,
 ) -> Result<String, String> {
     let context_str = context.unwrap_or_default();
+    
+    // 计算原回复字数（中文字符数）
+    let original_char_count = answer.chars().count();
+    let max_char_count = (original_char_count as f64 * 1.5) as usize;
+    
     let prompt = format!(
-        r#"你是一位专业的客服回复优化专家。请优化以下客服回复，使其更加专业、友好、准确。
+        r#"你是一位专业的客服回复优化专家。这是一项"保守编辑任务（Conservative Editing）"，不是重写。
+
+【核心原则】
+1. 保持原有结论与核心语义不变
+2. 仅优化表达、语气、专业边界
+3. 禁止无理由改变原回复结论
+4. 只有在以下情况允许纠正原回复：
+   - 明显事实错误
+   - 食品/营养专业不严谨
+   - 合规或误导风险
+   如纠正，必须在【内部优化说明】中标注"纠正原因"
+
+【字数限制（严格）】
+- 原回复字数：{} 字
+- 优化后回复字数上限：{} 字（不超过原字数的150%）
+- 超出上限将被拒绝，请务必控制字数
 
 上下文信息：
 {}
@@ -548,20 +568,43 @@ pub async fn optimize_answer_with_ai(
 
 请按照以下格式输出：
 【最终客服回复】
-<优化后的客服回复内容>
+<优化后的客服回复内容（字数≤{}字）>
 
 【内部优化说明】
 <优化说明，包括优化点、改进原因等>
+<如纠正原回复，必须标注"纠正原因：<具体原因>">
 
 要求：
-1. 保持原意的准确性
+1. 保持原意的准确性（核心语义不变）
 2. 语言更加专业和友好
 3. 结构清晰，易于理解
-4. 符合客服场景的语气要求"#,
-        context_str, answer
+4. 符合客服场景的语气要求
+5. 严格控制在{}字以内"#,
+        original_char_count, max_char_count, context_str, answer, max_char_count, max_char_count
     );
 
-    call_ai_api(prompt).await
+    let result = call_ai_api(prompt).await?;
+    
+    // 后处理：检查字数是否超出限制
+    if let Some(answer_section) = result.find("【最终客服回复】") {
+        let answer_start = answer_section + "【最终客服回复】".len();
+        let answer_end = result[answer_start..].find("【内部优化说明】")
+            .map(|i| answer_start + i)
+            .unwrap_or(result.len());
+        let optimized_answer = result[answer_start..answer_end].trim();
+        let optimized_char_count = optimized_answer.chars().count();
+        
+        if optimized_char_count > max_char_count {
+            return Err(format!(
+                "优化后回复字数（{}字）超出限制（{}字），超出{}%。请压缩内容或重新优化。",
+                optimized_char_count,
+                max_char_count,
+                ((optimized_char_count as f64 / max_char_count as f64 - 1.0) * 100.0) as usize
+            ));
+        }
+    }
+    
+    Ok(result)
 }
 
 #[tauri::command]
@@ -676,6 +719,61 @@ pub async fn set_ai_config(
 #[tauri::command]
 pub async fn get_ai_config() -> Result<Option<AiConfig>, String> {
     Ok(AI_CONFIG.lock().unwrap().clone())
+}
+
+#[tauri::command]
+pub async fn test_feishu_connection(app_id: String, app_secret: String) -> Result<String, String> {
+    if app_id.is_empty() || app_secret.is_empty() {
+        return Err("请先填写 App ID 和 App Secret".to_string());
+    }
+
+    // 直接请求 access_token 来测试连接
+    let client = reqwest::Client::new();
+    let url = format!("{}/auth/v3/tenant_access_token/internal", FEISHU_API_BASE);
+    let body = serde_json::json!({
+        "app_id": app_id,
+        "app_secret": app_secret,
+    });
+
+    let response = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| {
+            // 提供更友好的错误信息
+            let error_msg = e.to_string();
+            if error_msg.contains("timeout") || error_msg.contains("timed out") {
+                "连接失败: 网络请求超时，请检查网络连接".to_string()
+            } else if error_msg.contains("resolve") || error_msg.contains("DNS") {
+                "连接失败: 无法解析域名，请检查网络连接或 DNS 设置".to_string()
+            } else if error_msg.contains("connection refused") || error_msg.contains("Connection refused") {
+                "连接失败: 连接被拒绝，请检查网络连接或防火墙设置".to_string()
+            } else {
+                format!("连接失败: {}", error_msg)
+            }
+        })?;
+
+    let token_res: AccessTokenResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("连接失败: 解析响应失败 - {}", e))?;
+
+    if token_res.code != 0 {
+        // 根据错误代码提供更详细的说明
+        let error_msg = match token_res.code {
+            99991663 => format!("连接失败: App ID 无效或不存在 (错误代码: {})", token_res.code),
+            99991664 => format!("连接失败: App Secret 无效或错误 (错误代码: {})", token_res.code),
+            _ => format!("连接失败: {} (错误代码: {})", token_res.msg, token_res.code),
+        };
+        return Err(error_msg);
+    }
+
+    if token_res.tenant_access_token.is_none() {
+        return Err("连接失败: 响应中缺少 tenant_access_token".to_string());
+    }
+
+    Ok("连接测试成功！已成功获取 tenant_access_token".to_string())
 }
 
 #[tauri::command]

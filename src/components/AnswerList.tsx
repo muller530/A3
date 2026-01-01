@@ -2,12 +2,12 @@ import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 import { listAnswers, loadFeishuConfig, getBitableTables, Answer, BitableTable, optimizeAnswerWithAI, reviewAnswerWithAI, checkAnswerRisk, updateAnswerToFeishu } from "../lib/api";
-import { extractOptimizedAnswer, extractReviewResult, ReviewResult } from "../lib/utils";
+import { extractOptimizedAnswer, extractReviewResult, ReviewResult, isValidFeishuRecordId, getFeishuRecordId } from "../lib/utils";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "./ui/dialog";
-import { LogOut, Search, Eye, Loader2, AlertCircle, FileText, RefreshCw, Sparkles, Shield, AlertTriangle, CheckCircle2 } from "lucide-react";
+import { LogOut, Search, Eye, Loader2, AlertCircle, FileText, RefreshCw, Sparkles, Shield, AlertTriangle, CheckCircle2, Copy, ThumbsUp, ThumbsDown, Edit } from "lucide-react";
 
 type LoadingState = "idle" | "loading" | "success" | "error";
 
@@ -30,6 +30,10 @@ export default function AnswerList() {
   const [riskResult, setRiskResult] = useState<{ hasRisk: boolean; reason: string } | null>(null);
   const [submitting, setSubmitting] = useState(false); // 提交中
   const [submitMessage, setSubmitMessage] = useState<string>(""); // 提交消息
+  const [draftContent, setDraftContent] = useState<string>(""); // 草稿内容
+  const [showDraftEditor, setShowDraftEditor] = useState(false); // 是否显示草稿编辑器
+  const [aiRatings, setAiRatings] = useState<Record<string, { type: "optimize" | "review"; rating: "up" | "down" }>>({}); // AI 评价
+  const [copySuccess, setCopySuccess] = useState<string | null>(null); // 复制成功提示
   const { role, logout } = useAuth();
   const navigate = useNavigate();
 
@@ -164,14 +168,99 @@ export default function AnswerList() {
     setFilteredAnswers(filtered);
   };
 
+  // 加载评价数据
+  useEffect(() => {
+    if (selectedAnswer?.record_id) {
+      const ratings: Record<string, { type: "optimize" | "review"; rating: "up" | "down" }> = {};
+      
+      // 加载优化评价
+      const optimizeKey = `ai_rating_${selectedAnswer.record_id}_optimize`;
+      const optimizeSaved = localStorage.getItem(optimizeKey);
+      if (optimizeSaved) {
+        try {
+          const ratingData = JSON.parse(optimizeSaved);
+          ratings[`${selectedAnswer.record_id}_optimize`] = {
+            type: "optimize",
+            rating: ratingData.rating,
+          };
+        } catch (e) {
+          console.error("加载优化评价数据失败:", e);
+        }
+      }
+      
+      // 加载审核评价
+      const reviewKey = `ai_rating_${selectedAnswer.record_id}_review`;
+      const reviewSaved = localStorage.getItem(reviewKey);
+      if (reviewSaved) {
+        try {
+          const ratingData = JSON.parse(reviewSaved);
+          ratings[`${selectedAnswer.record_id}_review`] = {
+            type: "review",
+            rating: ratingData.rating,
+          };
+        } catch (e) {
+          console.error("加载审核评价数据失败:", e);
+        }
+      }
+      
+      setAiRatings(ratings);
+    } else {
+      setAiRatings({});
+    }
+  }, [selectedAnswer?.record_id]);
+
+  // 保存评价
+  const saveRating = (type: "optimize" | "review", rating: "up" | "down") => {
+    if (!selectedAnswer?.record_id) return;
+    
+    const key = `ai_rating_${selectedAnswer.record_id}_${type}`;
+    const ratingData = {
+      feishu_record_id: selectedAnswer.record_id,
+      answer_local_id: selectedAnswer.record_id, // 使用 record_id 作为本地ID
+      ai_type: type,
+      rating,
+      timestamp: new Date().toISOString(),
+    };
+    
+    localStorage.setItem(key, JSON.stringify(ratingData));
+    
+    // 更新本地状态 - 立即更新以显示视觉反馈
+    setAiRatings((prev) => ({
+      ...prev,
+      [`${selectedAnswer.record_id}_${type}`]: { type, rating },
+    }));
+  };
+
+  // 复制文本到剪贴板
+  const copyToClipboard = async (text: string, label: string = "内容") => {
+    if (!text || !text.trim()) {
+      setSubmitMessage(`没有可复制的${label}`);
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(text);
+      // 显示成功提示
+      setCopySuccess(label);
+      setSubmitMessage(`已复制${label}到剪贴板`);
+      // 2秒后清除按钮状态，3秒后清除消息
+      setTimeout(() => setCopySuccess(null), 2000);
+      setTimeout(() => setSubmitMessage(""), 3000);
+    } catch (error: any) {
+      setSubmitMessage(`复制失败: ${error.message || error.toString()}`);
+    }
+  };
+
   const handleViewDetail = (answer: Answer) => {
     setSelectedAnswer(answer);
     setDialogOpen(true);
-    // 重置 AI 结果
+    // 重置 AI 结果和草稿
     setOptimizedResult(null);
     setReviewResult(null);
     setRiskResult(null);
     setSubmitMessage("");
+    setDraftContent("");
+    setShowDraftEditor(false);
   };
 
   const handleOptimize = async () => {
@@ -230,17 +319,88 @@ export default function AnswerList() {
     }
   };
 
+  // 将 AI 回复作为草稿
+  const handleUseAsDraft = () => {
+    // 确定要作为草稿的内容：优先使用审核推荐回复，其次使用优化后的回复
+    let contentToDraft = "";
+    if (reviewResult?.recommendedReply) {
+      contentToDraft = reviewResult.recommendedReply;
+    } else if (optimizedResult?.answerText) {
+      contentToDraft = optimizedResult.answerText;
+    } else {
+      setSubmitMessage("没有可用的内容");
+      return;
+    }
+    
+    setDraftContent(contentToDraft);
+    setShowDraftEditor(true);
+  };
+
+  // 复制为客服回复（权限控制）
+  const handleCopyToClipboard = async () => {
+    if (!selectedAnswer) return;
+    
+    // 权限检查：如果审核状态不是"已通过"，非管理员不能复制
+    const reviewStatus = selectedAnswer.raw_fields?.["审核状态"] || 
+                        selectedAnswer.raw_fields?.["状态"] || 
+                        selectedAnswer.enable_status || "";
+    const isApproved = reviewStatus === "已通过" || reviewStatus === "已启用" || reviewStatus === "启用";
+    
+    if (!isApproved && role !== "admin") {
+      setSubmitMessage("权限不足：只有审核状态为'已通过'的回复才能复制，或需要管理员权限");
+      return;
+    }
+    
+    // 确定要复制的内容：优先使用草稿，其次使用审核推荐回复，最后使用优化后的回复
+    let contentToCopy = "";
+    if (draftContent) {
+      contentToCopy = draftContent;
+    } else if (reviewResult?.recommendedReply) {
+      contentToCopy = reviewResult.recommendedReply;
+    } else if (optimizedResult?.answerText) {
+      contentToCopy = optimizedResult.answerText;
+    } else if (selectedAnswer.standard_answer) {
+      contentToCopy = selectedAnswer.standard_answer;
+    } else {
+      setSubmitMessage("没有可复制的内容");
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(contentToCopy);
+      setSubmitMessage("已复制到剪贴板，可直接粘贴使用");
+      setTimeout(() => setSubmitMessage(""), 3000);
+    } catch (error: any) {
+      setSubmitMessage(`复制失败: ${error.message || error.toString()}`);
+    }
+  };
+
   const handleSubmitToFeishu = async () => {
+    // 权限检查：只有管理员可以写回
+    if (role !== "admin") {
+      setSubmitMessage("权限不足：只有管理员可以写回飞书");
+      return;
+    }
+
     if (!selectedAnswer) return;
 
-    // 确定要提交的内容：优先使用审核推荐回复，其次使用优化后的回复
+    // 校验 feishu_record_id
+    const feishuRecordId = getFeishuRecordId(selectedAnswer);
+    if (!feishuRecordId) {
+      setSubmitMessage("错误：无效的记录ID（必须以 rec 开头），无法写回飞书");
+      return;
+    }
+
+    // 确定要提交的内容：优先使用草稿内容，其次使用审核推荐回复，最后使用优化后的回复
     let contentToSubmit = "";
-    if (reviewResult?.recommendedReply) {
+    if (draftContent) {
+      contentToSubmit = draftContent;
+    } else if (reviewResult?.recommendedReply) {
       contentToSubmit = reviewResult.recommendedReply;
     } else if (optimizedResult?.answerText) {
       contentToSubmit = optimizedResult.answerText;
     } else {
-      setSubmitMessage("没有可提交的内容");
+      setSubmitMessage("没有可提交的内容，请先使用 AI 优化或审核功能");
       return;
     }
 
@@ -258,19 +418,84 @@ export default function AnswerList() {
         throw new Error("请先选择表格");
       }
 
-      // 构建更新字段（使用飞书字段名"标准回答"）
-      const fields = {
+      // 构建更新字段：标准回答 + 审核状态（管理员直接写为"已通过"）
+      const fields: Record<string, any> = {
         "标准回答": contentToSubmit,
       };
 
+      // 管理员写回时直接设置为"已通过"状态
+      const reviewStatusFieldNames = ["审核状态", "状态", "启用状态", "enable_status", "status"];
+      let statusFieldFound = false;
+      
+      // 从原始字段中查找审核状态字段名
+      if (selectedAnswer.raw_fields) {
+        for (const fieldName of reviewStatusFieldNames) {
+          if (selectedAnswer.raw_fields[fieldName] !== undefined) {
+            fields[fieldName] = "已通过";
+            statusFieldFound = true;
+            break;
+          }
+        }
+      }
+      
+      // 如果没有找到，使用默认字段名
+      if (!statusFieldFound) {
+        fields["状态"] = "已通过";
+      }
+
+      // 设置最新版本来源
+      // 判断来源：如果有草稿内容且被修改过，则为"人工调整"；否则根据AI结果类型判断
+      let sourceValue = "";
+      if (draftContent && draftContent !== contentToSubmit) {
+        // 如果草稿内容与提交内容不同，说明用户修改过
+        sourceValue = "人工调整";
+      } else if (draftContent) {
+        // 如果有草稿但内容未修改，判断原始来源
+        if (reviewResult?.recommendedReply && draftContent === reviewResult.recommendedReply) {
+          sourceValue = "AI审核";
+        } else if (optimizedResult?.answerText && draftContent === optimizedResult.answerText) {
+          sourceValue = "AI优化";
+        } else {
+          sourceValue = "人工调整";
+        }
+      } else {
+        // 没有草稿，直接使用AI结果
+        if (reviewResult?.recommendedReply && contentToSubmit === reviewResult.recommendedReply) {
+          sourceValue = "AI审核";
+        } else if (optimizedResult?.answerText && contentToSubmit === optimizedResult.answerText) {
+          sourceValue = "AI优化";
+        } else {
+          sourceValue = "AI优化"; // 默认值
+        }
+      }
+      
+      const sourceFieldNames = ["最新版本来源", "版本来源", "来源"];
+      let sourceFieldFound = false;
+      if (selectedAnswer.raw_fields) {
+        for (const fieldName of sourceFieldNames) {
+          if (selectedAnswer.raw_fields[fieldName] !== undefined) {
+            fields[fieldName] = sourceValue;
+            sourceFieldFound = true;
+            break;
+          }
+        }
+      }
+      if (!sourceFieldFound) {
+        fields["最新版本来源"] = sourceValue;
+      }
+
+      // 使用 feishu_record_id 写回
       await updateAnswerToFeishu(
         config.appToken,
         tableId,
-        selectedAnswer.record_id,
+        feishuRecordId,
         fields
       );
 
-      setSubmitMessage("提交成功！已写回飞书");
+      setSubmitMessage("提交成功！已写回飞书（状态：已通过）");
+      // 清空草稿
+      setDraftContent("");
+      setShowDraftEditor(false);
     } catch (error: any) {
       setSubmitMessage(`提交失败: ${error.message || error.toString()}`);
     } finally {
@@ -568,7 +793,31 @@ export default function AnswerList() {
                   </div>
                 </div>
                 <div>
-                  <div className="font-medium text-sm text-gray-700 mb-1">标准回答</div>
+                  <div className="flex items-center justify-between mb-1">
+                    <div className="font-medium text-sm text-gray-700">标准回答</div>
+                    <Button
+                      variant={copySuccess === "标准回答" ? "default" : "outline"}
+                      size="sm"
+                      onClick={() => copyToClipboard(selectedAnswer.standard_answer, "标准回答")}
+                      className={`h-7 transition-all ${
+                        copySuccess === "标准回答" 
+                          ? "bg-green-500 hover:bg-green-600 text-white border-green-500" 
+                          : ""
+                      }`}
+                    >
+                      {copySuccess === "标准回答" ? (
+                        <>
+                          <CheckCircle2 className="w-3 h-3 mr-1" />
+                          已复制
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3 h-3 mr-1" />
+                          复制
+                        </>
+                      )}
+                    </Button>
+                  </div>
                   <div className="text-sm text-gray-900 bg-gray-50 p-3 rounded-md whitespace-pre-wrap">
                     {selectedAnswer.standard_answer}
                   </div>
@@ -613,7 +862,12 @@ export default function AnswerList() {
                 </div>
                 {/* AI 功能区域 */}
                 <div className="border-t pt-4 mt-4">
-                  <div className="font-medium text-sm text-gray-700 mb-3">AI 功能</div>
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="font-medium text-sm text-gray-700">AI 功能</div>
+                    <div className="text-xs text-amber-600 bg-amber-50 px-3 py-1 rounded border border-amber-200">
+                      ⚠️ AI 建议仅供参考，不会直接影响知识库
+                    </div>
+                  </div>
                   <div className="flex flex-wrap gap-2 mb-4">
                     <Button
                       variant="outline"
@@ -675,11 +929,67 @@ export default function AnswerList() {
                   {optimizedResult && (
                     <Card className="mb-4 border-blue-200 bg-blue-50">
                       <CardHeader className="pb-3">
-                        <CardTitle className="text-sm">AI 优化结果</CardTitle>
+                        <div className="flex items-center justify-between">
+                          <CardTitle className="text-sm">AI 优化结果</CardTitle>
+                          <div className="flex items-center gap-1">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                saveRating("optimize", "up");
+                              }}
+                              className={`p-1.5 rounded transition-colors ${
+                                aiRatings[`${selectedAnswer?.record_id}_optimize`]?.rating === "up" 
+                                  ? "bg-blue-500 text-white" 
+                                  : "bg-blue-100 text-blue-600 hover:bg-blue-200"
+                              }`}
+                              title="有用"
+                            >
+                              <ThumbsUp className="w-4 h-4" />
+                            </button>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                saveRating("optimize", "down");
+                              }}
+                              className={`p-1.5 rounded transition-colors ${
+                                aiRatings[`${selectedAnswer?.record_id}_optimize`]?.rating === "down" 
+                                  ? "bg-blue-500 text-white" 
+                                  : "bg-blue-100 text-blue-600 hover:bg-blue-200"
+                              }`}
+                              title="不太合适"
+                            >
+                              <ThumbsDown className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </div>
                       </CardHeader>
                       <CardContent className="space-y-3">
                         <div>
-                          <div className="font-medium text-xs text-gray-700 mb-1">优化后的客服回复</div>
+                          <div className="flex items-center justify-between mb-1">
+                            <div className="font-medium text-xs text-gray-700">优化后的客服回复</div>
+                            <Button
+                              variant={copySuccess === "优化后的回复" ? "default" : "outline"}
+                              size="sm"
+                              onClick={() => copyToClipboard(optimizedResult.answerText, "优化后的回复")}
+                              className={`h-6 text-xs transition-all ${
+                                copySuccess === "优化后的回复" 
+                                  ? "bg-green-500 hover:bg-green-600 text-white border-green-500" 
+                                  : ""
+                              }`}
+                            >
+                              {copySuccess === "优化后的回复" ? (
+                                <>
+                                  <CheckCircle2 className="w-3 h-3 mr-1" />
+                                  已复制
+                                </>
+                              ) : (
+                                <>
+                                  <Copy className="w-3 h-3 mr-1" />
+                                  复制
+                                </>
+                              )}
+                            </Button>
+                          </div>
                           <div className="text-sm text-gray-900 bg-white p-3 rounded-md whitespace-pre-wrap border border-blue-200">
                             {optimizedResult.answerText}
                           </div>
@@ -690,6 +1000,34 @@ export default function AnswerList() {
                             <div className="text-xs text-gray-600 bg-white p-2 rounded-md whitespace-pre-wrap border border-blue-200">
                               {optimizedResult.explanationText}
                             </div>
+                          </div>
+                        )}
+                        {/* 只有管理员可以看到"作为回复草稿"按钮 */}
+                        {role === "admin" && (
+                          <div className="pt-2">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={handleUseAsDraft}
+                              className="w-full"
+                            >
+                              <Edit className="w-4 h-4 mr-2" />
+                              作为回复草稿
+                            </Button>
+                          </div>
+                        )}
+                        {/* 普通用户显示复制按钮 */}
+                        {role === "user" && (
+                          <div className="pt-2">
+                            <Button
+                              variant="default"
+                              size="sm"
+                              onClick={() => copyToClipboard(optimizedResult.answerText, "优化后的回复")}
+                              className="w-full"
+                            >
+                              <Copy className="w-4 h-4 mr-2" />
+                              复制为客服回复
+                            </Button>
                           </div>
                         )}
                       </CardContent>
@@ -705,7 +1043,63 @@ export default function AnswerList() {
                       "border-gray-200 bg-gray-50"
                     }`}>
                       <CardHeader className="pb-3">
-                        <CardTitle className="text-sm">AI 审核结果</CardTitle>
+                        <div className="flex items-center justify-between">
+                          <CardTitle className="text-sm">AI 审核结果</CardTitle>
+                          <div className="flex items-center gap-1">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                saveRating("review", "up");
+                              }}
+                              className={`p-1.5 rounded transition-colors ${
+                                reviewResult.conclusion === "合理" 
+                                  ? aiRatings[`${selectedAnswer?.record_id}_review`]?.rating === "up"
+                                    ? "bg-green-500 text-white"
+                                    : "bg-green-100 text-green-600 hover:bg-green-200"
+                                  : reviewResult.conclusion === "基本合理"
+                                  ? aiRatings[`${selectedAnswer?.record_id}_review`]?.rating === "up"
+                                    ? "bg-yellow-500 text-white"
+                                    : "bg-yellow-100 text-yellow-600 hover:bg-yellow-200"
+                                  : reviewResult.conclusion === "需修改"
+                                  ? aiRatings[`${selectedAnswer?.record_id}_review`]?.rating === "up"
+                                    ? "bg-red-500 text-white"
+                                    : "bg-red-100 text-red-600 hover:bg-red-200"
+                                  : aiRatings[`${selectedAnswer?.record_id}_review`]?.rating === "up"
+                                    ? "bg-gray-500 text-white"
+                                    : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                              }`}
+                              title="有用"
+                            >
+                              <ThumbsUp className="w-4 h-4" />
+                            </button>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                saveRating("review", "down");
+                              }}
+                              className={`p-1.5 rounded transition-colors ${
+                                reviewResult.conclusion === "合理" 
+                                  ? aiRatings[`${selectedAnswer?.record_id}_review`]?.rating === "down"
+                                    ? "bg-green-500 text-white"
+                                    : "bg-green-100 text-green-600 hover:bg-green-200"
+                                  : reviewResult.conclusion === "基本合理"
+                                  ? aiRatings[`${selectedAnswer?.record_id}_review`]?.rating === "down"
+                                    ? "bg-yellow-500 text-white"
+                                    : "bg-yellow-100 text-yellow-600 hover:bg-yellow-200"
+                                  : reviewResult.conclusion === "需修改"
+                                  ? aiRatings[`${selectedAnswer?.record_id}_review`]?.rating === "down"
+                                    ? "bg-red-500 text-white"
+                                    : "bg-red-100 text-red-600 hover:bg-red-200"
+                                  : aiRatings[`${selectedAnswer?.record_id}_review`]?.rating === "down"
+                                    ? "bg-gray-500 text-white"
+                                    : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                              }`}
+                              title="不太合适"
+                            >
+                              <ThumbsDown className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </div>
                       </CardHeader>
                       <CardContent className="space-y-3">
                         {reviewResult.conclusion && (
@@ -747,7 +1141,31 @@ export default function AnswerList() {
                         )}
                         {reviewResult.recommendedReply && (
                           <div>
-                            <div className="font-medium text-xs text-gray-700 mb-1">修改后推荐回复</div>
+                            <div className="flex items-center justify-between mb-1">
+                              <div className="font-medium text-xs text-gray-700">修改后推荐回复</div>
+                              <Button
+                                variant={copySuccess === "推荐回复" ? "default" : "outline"}
+                                size="sm"
+                                onClick={() => copyToClipboard(reviewResult.recommendedReply || "", "推荐回复")}
+                                className={`h-6 text-xs transition-all ${
+                                  copySuccess === "推荐回复" 
+                                    ? "bg-green-500 hover:bg-green-600 text-white border-green-500" 
+                                    : ""
+                                }`}
+                              >
+                                {copySuccess === "推荐回复" ? (
+                                  <>
+                                    <CheckCircle2 className="w-3 h-3 mr-1" />
+                                    已复制
+                                  </>
+                                ) : (
+                                  <>
+                                    <Copy className="w-3 h-3 mr-1" />
+                                    复制
+                                  </>
+                                )}
+                              </Button>
+                            </div>
                             <div className="text-sm text-gray-900 bg-white p-3 rounded-md whitespace-pre-wrap border border-green-200">
                               {reviewResult.recommendedReply}
                             </div>
@@ -760,6 +1178,38 @@ export default function AnswerList() {
                               {reviewResult.suggestion}
                             </div>
                           </div>
+                        )}
+                        {reviewResult.recommendedReply && (
+                          <>
+                            {/* 只有管理员可以看到"作为回复草稿"按钮 */}
+                            {role === "admin" && (
+                              <div className="pt-2">
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={handleUseAsDraft}
+                                  className="w-full"
+                                >
+                                  <Edit className="w-4 h-4 mr-2" />
+                                  作为回复草稿
+                                </Button>
+                              </div>
+                            )}
+                            {/* 普通用户显示复制按钮 */}
+                            {role === "user" && (
+                              <div className="pt-2">
+                                <Button
+                                  variant="default"
+                                  size="sm"
+                                  onClick={() => copyToClipboard(reviewResult.recommendedReply || "", "推荐回复")}
+                                  className="w-full"
+                                >
+                                  <Copy className="w-4 h-4 mr-2" />
+                                  复制为客服回复
+                                </Button>
+                              </div>
+                            )}
+                          </>
                         )}
                       </CardContent>
                     </Card>
@@ -821,38 +1271,116 @@ export default function AnswerList() {
                   </details>
                 </div>
 
-                {/* 提交按钮区域 */}
-                {(optimizedResult?.answerText || reviewResult?.recommendedReply) && (
+                {/* 草稿编辑器 */}
+                {showDraftEditor && (
+                  <div className="border-t pt-4 mt-4">
+                    <div className="space-y-3">
+                      <div>
+                        <div className="font-medium text-sm text-gray-700 mb-2">回复草稿</div>
+                        <textarea
+                          value={draftContent}
+                          onChange={(e) => setDraftContent(e.target.value)}
+                          className="w-full min-h-[120px] p-3 border border-gray-300 rounded-md text-sm font-mono resize-y focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          placeholder={role === "admin" ? "你可以在此基础上修改后再提交，提交后将直接写回飞书并设置为已通过状态" : "你可以在此基础上修改后复制使用"}
+                        />
+                        <div className="text-xs text-gray-500 mt-1">
+                          {role === "admin" 
+                            ? "你可以在此基础上修改后再提交，提交后将直接写回飞书并设置为已通过状态"
+                            : "你可以在此基础上修改后复制使用"}
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-between gap-4">
+                        <div className="flex-1">
+                          {submitMessage && (
+                            <div className={`text-sm ${
+                              submitMessage.includes("成功") || submitMessage.includes("已复制") || submitMessage.includes("已提交")
+                                ? "text-green-600 flex items-center gap-1" 
+                                : "text-red-600"
+                            }`}>
+                              {(submitMessage.includes("成功") || submitMessage.includes("已复制") || submitMessage.includes("已提交")) && (
+                                <CheckCircle2 className="w-4 h-4" />
+                              )}
+                              {submitMessage}
+                            </div>
+                          )}
+                        </div>
+                        <div className="flex gap-2">
+                          {/* 管理员：显示采纳并提交按钮 */}
+                          {role === "admin" && (
+                            <Button
+                              onClick={handleSubmitToFeishu}
+                              disabled={submitting || !draftContent.trim()}
+                              className="flex-shrink-0"
+                            >
+                              {submitting ? (
+                                <>
+                                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                                  提交中...
+                                </>
+                              ) : (
+                                "采纳并提交"
+                              )}
+                            </Button>
+                          )}
+                          {/* 普通用户：显示复制按钮 */}
+                          {role === "user" && (
+                            <Button
+                              onClick={handleCopyToClipboard}
+                              variant="default"
+                              className="flex-shrink-0"
+                            >
+                              <Copy className="w-4 h-4 mr-2" />
+                              复制为客服回复
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* 操作按钮区域（当没有草稿编辑器时显示） */}
+                {!showDraftEditor && (optimizedResult?.answerText || reviewResult?.recommendedReply) && (
                   <div className="border-t pt-4 mt-4">
                     <div className="flex items-center justify-between gap-4">
                       <div className="flex-1">
                         {submitMessage && (
                           <div className={`text-sm ${
-                            submitMessage.includes("成功") 
+                            submitMessage.includes("成功") || submitMessage.includes("已复制")
                               ? "text-green-600 flex items-center gap-1" 
                               : "text-red-600"
                           }`}>
-                            {submitMessage.includes("成功") && (
+                            {(submitMessage.includes("成功") || submitMessage.includes("已复制")) && (
                               <CheckCircle2 className="w-4 h-4" />
                             )}
                             {submitMessage}
                           </div>
                         )}
                       </div>
-                      <Button
-                        onClick={handleSubmitToFeishu}
-                        disabled={submitting}
-                        className="flex-shrink-0"
-                      >
-                        {submitting ? (
-                          <>
-                            <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                            提交中...
-                          </>
-                        ) : (
-                          "提交并写回飞书"
+                      <div className="flex gap-2">
+                        {/* 普通用户：显示复制按钮 */}
+                        {role === "user" && (
+                          <Button
+                            onClick={handleCopyToClipboard}
+                            variant="default"
+                            className="flex-shrink-0"
+                          >
+                            <Copy className="w-4 h-4 mr-2" />
+                            复制为客服回复
+                          </Button>
                         )}
-                      </Button>
+                        {/* 管理员：显示写回按钮（已废弃，应该使用草稿编辑器） */}
+                        {role === "admin" && (
+                          <Button
+                            onClick={handleUseAsDraft}
+                            variant="outline"
+                            className="flex-shrink-0"
+                          >
+                            <Edit className="w-4 h-4 mr-2" />
+                            编辑后提交
+                          </Button>
+                        )}
+                      </div>
                     </div>
                   </div>
                 )}
