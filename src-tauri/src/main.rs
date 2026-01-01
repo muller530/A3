@@ -12,6 +12,13 @@ fn main() {
             commands::get_bitable_tables,
             commands::get_answers_data,
             commands::list_answers,
+            commands::optimize_answer_with_ai,
+            commands::review_answer_with_ai,
+            commands::check_answer_risk,
+            commands::set_ai_config,
+            commands::get_ai_config,
+            commands::test_ai_connection,
+            commands::update_answer_to_feishu,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

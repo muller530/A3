@@ -1,12 +1,13 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
-import { listAnswers, loadFeishuConfig, getBitableTables, Answer, BitableTable } from "../lib/api";
+import { listAnswers, loadFeishuConfig, getBitableTables, Answer, BitableTable, optimizeAnswerWithAI, reviewAnswerWithAI, checkAnswerRisk, updateAnswerToFeishu } from "../lib/api";
+import { extractOptimizedAnswer, extractReviewResult, ReviewResult } from "../lib/utils";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "./ui/dialog";
-import { LogOut, Search, Eye, Loader2, AlertCircle, FileText, RefreshCw } from "lucide-react";
+import { LogOut, Search, Eye, Loader2, AlertCircle, FileText, RefreshCw, Sparkles, Shield, AlertTriangle, CheckCircle2 } from "lucide-react";
 
 type LoadingState = "idle" | "loading" | "success" | "error";
 
@@ -21,6 +22,14 @@ export default function AnswerList() {
   const [showAll, setShowAll] = useState(false); // 调试模式：显示所有数据
   const [tables, setTables] = useState<BitableTable[]>([]); // 表格列表
   const [selectedTableId, setSelectedTableId] = useState<string>(""); // 选中的表格ID
+  const [optimizing, setOptimizing] = useState(false); // AI 优化中
+  const [reviewing, setReviewing] = useState(false); // AI 审核中
+  const [checkingRisk, setCheckingRisk] = useState(false); // 风险检测中
+  const [optimizedResult, setOptimizedResult] = useState<{ answerText: string; explanationText?: string } | null>(null);
+  const [reviewResult, setReviewResult] = useState<ReviewResult | null>(null);
+  const [riskResult, setRiskResult] = useState<{ hasRisk: boolean; reason: string } | null>(null);
+  const [submitting, setSubmitting] = useState(false); // 提交中
+  const [submitMessage, setSubmitMessage] = useState<string>(""); // 提交消息
   const { role, logout } = useAuth();
   const navigate = useNavigate();
 
@@ -32,7 +41,7 @@ export default function AnswerList() {
   // 搜索和过滤
   useEffect(() => {
     filterAnswers();
-  }, [searchTerm, answers]);
+  }, [searchTerm, answers, showAll]);
 
   // 加载表格列表
   const loadTables = async () => {
@@ -158,6 +167,115 @@ export default function AnswerList() {
   const handleViewDetail = (answer: Answer) => {
     setSelectedAnswer(answer);
     setDialogOpen(true);
+    // 重置 AI 结果
+    setOptimizedResult(null);
+    setReviewResult(null);
+    setRiskResult(null);
+    setSubmitMessage("");
+  };
+
+  const handleOptimize = async () => {
+    if (!selectedAnswer) return;
+    setOptimizing(true);
+    setOptimizedResult(null);
+    try {
+      const context = `问题：${selectedAnswer.question}\n产品：${selectedAnswer.product_name}\n场景：${selectedAnswer.scene}\n语气：${selectedAnswer.tone}`;
+      const result = await optimizeAnswerWithAI(selectedAnswer.standard_answer, context);
+      const extracted = extractOptimizedAnswer(result);
+      setOptimizedResult(extracted);
+    } catch (error: any) {
+      setOptimizedResult({
+        answerText: error?.toString() || "优化失败",
+      });
+    } finally {
+      setOptimizing(false);
+    }
+  };
+
+  const handleReview = async () => {
+    if (!selectedAnswer) return;
+    setReviewing(true);
+    setReviewResult(null);
+    try {
+      const context = `问题：${selectedAnswer.question}\n产品：${selectedAnswer.product_name}\n场景：${selectedAnswer.scene}\n语气：${selectedAnswer.tone}`;
+      const result = await reviewAnswerWithAI(selectedAnswer.standard_answer, context);
+      const extracted = extractReviewResult(result);
+      setReviewResult(extracted);
+    } catch (error: any) {
+      setReviewResult({
+        conclusion: "",
+        judgmentExplanation: error?.toString() || "审核失败",
+        riskPoints: "",
+        rawText: error?.toString() || "审核失败",
+      });
+    } finally {
+      setReviewing(false);
+    }
+  };
+
+  const handleCheckRisk = async () => {
+    if (!selectedAnswer) return;
+    setCheckingRisk(true);
+    setRiskResult(null);
+    try {
+      const result = await checkAnswerRisk(selectedAnswer.standard_answer);
+      setRiskResult(result);
+    } catch (error: any) {
+      setRiskResult({
+        hasRisk: false,
+        reason: error?.toString() || "检测失败",
+      });
+    } finally {
+      setCheckingRisk(false);
+    }
+  };
+
+  const handleSubmitToFeishu = async () => {
+    if (!selectedAnswer) return;
+
+    // 确定要提交的内容：优先使用审核推荐回复，其次使用优化后的回复
+    let contentToSubmit = "";
+    if (reviewResult?.recommendedReply) {
+      contentToSubmit = reviewResult.recommendedReply;
+    } else if (optimizedResult?.answerText) {
+      contentToSubmit = optimizedResult.answerText;
+    } else {
+      setSubmitMessage("没有可提交的内容");
+      return;
+    }
+
+    setSubmitting(true);
+    setSubmitMessage("");
+
+    try {
+      const config = loadFeishuConfig();
+      if (!config || !config.appToken) {
+        throw new Error("未找到飞书配置，请先前往配置中心设置");
+      }
+
+      const tableId = selectedTableId || config.tableId;
+      if (!tableId) {
+        throw new Error("请先选择表格");
+      }
+
+      // 构建更新字段（使用飞书字段名"标准回答"）
+      const fields = {
+        "标准回答": contentToSubmit,
+      };
+
+      await updateAnswerToFeishu(
+        config.appToken,
+        tableId,
+        selectedAnswer.record_id,
+        fields
+      );
+
+      setSubmitMessage("提交成功！已写回飞书");
+    } catch (error: any) {
+      setSubmitMessage(`提交失败: ${error.message || error.toString()}`);
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const handleLogout = () => {
@@ -493,6 +611,184 @@ export default function AnswerList() {
                     </div>
                   </div>
                 </div>
+                {/* AI 功能区域 */}
+                <div className="border-t pt-4 mt-4">
+                  <div className="font-medium text-sm text-gray-700 mb-3">AI 功能</div>
+                  <div className="flex flex-wrap gap-2 mb-4">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleOptimize}
+                      disabled={optimizing}
+                    >
+                      {optimizing ? (
+                        <>
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          优化中...
+                        </>
+                      ) : (
+                        <>
+                          <Sparkles className="w-4 h-4 mr-2" />
+                          AI 优化
+                        </>
+                      )}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleReview}
+                      disabled={reviewing}
+                    >
+                      {reviewing ? (
+                        <>
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          审核中...
+                        </>
+                      ) : (
+                        <>
+                          <Shield className="w-4 h-4 mr-2" />
+                          AI 审核
+                        </>
+                      )}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleCheckRisk}
+                      disabled={checkingRisk}
+                    >
+                      {checkingRisk ? (
+                        <>
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          检测中...
+                        </>
+                      ) : (
+                        <>
+                          <AlertTriangle className="w-4 h-4 mr-2" />
+                          风险检测
+                        </>
+                      )}
+                    </Button>
+                  </div>
+
+                  {/* AI 优化结果 */}
+                  {optimizedResult && (
+                    <Card className="mb-4 border-blue-200 bg-blue-50">
+                      <CardHeader className="pb-3">
+                        <CardTitle className="text-sm">AI 优化结果</CardTitle>
+                      </CardHeader>
+                      <CardContent className="space-y-3">
+                        <div>
+                          <div className="font-medium text-xs text-gray-700 mb-1">优化后的客服回复</div>
+                          <div className="text-sm text-gray-900 bg-white p-3 rounded-md whitespace-pre-wrap border border-blue-200">
+                            {optimizedResult.answerText}
+                          </div>
+                        </div>
+                        {optimizedResult.explanationText && (
+                          <div>
+                            <div className="font-medium text-xs text-gray-700 mb-1">内部优化说明</div>
+                            <div className="text-xs text-gray-600 bg-white p-2 rounded-md whitespace-pre-wrap border border-blue-200">
+                              {optimizedResult.explanationText}
+                            </div>
+                          </div>
+                        )}
+                      </CardContent>
+                    </Card>
+                  )}
+
+                  {/* AI 审核结果 */}
+                  {reviewResult && (
+                    <Card className={`mb-4 ${
+                      reviewResult.conclusion === "合理" ? "border-green-200 bg-green-50" :
+                      reviewResult.conclusion === "基本合理" ? "border-yellow-200 bg-yellow-50" :
+                      reviewResult.conclusion === "需修改" ? "border-red-200 bg-red-50" :
+                      "border-gray-200 bg-gray-50"
+                    }`}>
+                      <CardHeader className="pb-3">
+                        <CardTitle className="text-sm">AI 审核结果</CardTitle>
+                      </CardHeader>
+                      <CardContent className="space-y-3">
+                        {reviewResult.conclusion && (
+                          <div>
+                            <div className="font-medium text-xs text-gray-700 mb-1">审核结论</div>
+                            <div className={`text-sm font-semibold p-2 rounded-md ${
+                              reviewResult.conclusion === "合理" ? "bg-green-100 text-green-800" :
+                              reviewResult.conclusion === "基本合理" ? "bg-yellow-100 text-yellow-800" :
+                              reviewResult.conclusion === "需修改" ? "bg-red-100 text-red-800" :
+                              "bg-gray-100 text-gray-800"
+                            }`}>
+                              {reviewResult.conclusion}
+                            </div>
+                          </div>
+                        )}
+                        {reviewResult.judgmentExplanation && (
+                          <div>
+                            <div className="font-medium text-xs text-gray-700 mb-1">专业判断说明</div>
+                            <div className="text-xs text-gray-900 bg-white p-2 rounded-md whitespace-pre-wrap border">
+                              {reviewResult.judgmentExplanation}
+                            </div>
+                          </div>
+                        )}
+                        {reviewResult.riskPoints && (
+                          <div>
+                            <div className="font-medium text-xs text-gray-700 mb-1">潜在风险或注意点</div>
+                            <div className="text-xs text-gray-900 bg-white p-2 rounded-md whitespace-pre-wrap border">
+                              {reviewResult.riskPoints}
+                            </div>
+                          </div>
+                        )}
+                        {reviewResult.modificationReason && (
+                          <div>
+                            <div className="font-medium text-xs text-gray-700 mb-1">需修改原因</div>
+                            <div className="text-xs text-gray-900 bg-white p-2 rounded-md whitespace-pre-wrap border border-red-200">
+                              {reviewResult.modificationReason}
+                            </div>
+                          </div>
+                        )}
+                        {reviewResult.recommendedReply && (
+                          <div>
+                            <div className="font-medium text-xs text-gray-700 mb-1">修改后推荐回复</div>
+                            <div className="text-sm text-gray-900 bg-white p-3 rounded-md whitespace-pre-wrap border border-green-200">
+                              {reviewResult.recommendedReply}
+                            </div>
+                          </div>
+                        )}
+                        {reviewResult.suggestion && (
+                          <div>
+                            <div className="font-medium text-xs text-gray-700 mb-1">修改建议</div>
+                            <div className="text-xs text-gray-900 bg-white p-2 rounded-md whitespace-pre-wrap border border-yellow-200">
+                              {reviewResult.suggestion}
+                            </div>
+                          </div>
+                        )}
+                      </CardContent>
+                    </Card>
+                  )}
+
+                  {/* 风险检测结果 */}
+                  {riskResult && (
+                    <Card className={`mb-4 ${
+                      riskResult.hasRisk ? "border-red-200 bg-red-50" : "border-green-200 bg-green-50"
+                    }`}>
+                      <CardHeader className="pb-3">
+                        <CardTitle className="text-sm">风险检测结果</CardTitle>
+                      </CardHeader>
+                      <CardContent>
+                        <div className={`text-sm font-semibold mb-2 ${
+                          riskResult.hasRisk ? "text-red-800" : "text-green-800"
+                        }`}>
+                          {riskResult.hasRisk ? "⚠️ 存在风险" : "✅ 无风险"}
+                        </div>
+                        {riskResult.reason && (
+                          <div className="text-xs text-gray-700 bg-white p-2 rounded-md border whitespace-pre-wrap">
+                            {riskResult.reason}
+                          </div>
+                        )}
+                      </CardContent>
+                    </Card>
+                  )}
+                </div>
+
                 <div className="border-t pt-4 mt-4">
                   <details className="cursor-pointer">
                     <summary className="font-medium text-sm text-gray-700 mb-2">
@@ -524,6 +820,42 @@ export default function AnswerList() {
                     </div>
                   </details>
                 </div>
+
+                {/* 提交按钮区域 */}
+                {(optimizedResult?.answerText || reviewResult?.recommendedReply) && (
+                  <div className="border-t pt-4 mt-4">
+                    <div className="flex items-center justify-between gap-4">
+                      <div className="flex-1">
+                        {submitMessage && (
+                          <div className={`text-sm ${
+                            submitMessage.includes("成功") 
+                              ? "text-green-600 flex items-center gap-1" 
+                              : "text-red-600"
+                          }`}>
+                            {submitMessage.includes("成功") && (
+                              <CheckCircle2 className="w-4 h-4" />
+                            )}
+                            {submitMessage}
+                          </div>
+                        )}
+                      </div>
+                      <Button
+                        onClick={handleSubmitToFeishu}
+                        disabled={submitting}
+                        className="flex-shrink-0"
+                      >
+                        {submitting ? (
+                          <>
+                            <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                            提交中...
+                          </>
+                        ) : (
+                          "提交并写回飞书"
+                        )}
+                      </Button>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </DialogContent>

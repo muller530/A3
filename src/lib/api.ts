@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { testFeishuConnection } from "./feishuClient";
 
 export interface FeishuCredentials {
   app_id: string;
@@ -27,19 +28,6 @@ export interface BitableTable {
 export interface AnswerRecord {
   record_id: string;
   fields: Record<string, any>;
-}
-
-// Answers 表的结构化数据类型
-export interface Answer {
-  record_id: string;
-  question: string;           // 问题
-  standard_answer: string;    // 标准回答
-  enable_status: string;      // 状态（启用 / 停用）
-  scene: string;              // 使用场景
-  tone: string;               // 语气
-  product_name: string;       // 对应产品
-  product_id: string;         // product_id
-  raw_fields?: Record<string, any>; // 原始字段数据（用于调试）
 }
 
 // 设置飞书凭证（保存到后端）
@@ -115,54 +103,12 @@ export function loadFeishuConfig(): Partial<FeishuConfig> | null {
   };
 }
 
-// 测试飞书连接（使用后端 Tauri 命令）
+// 测试飞书连接
 export async function testConnection(
   appId: string,
   appSecret: string
 ): Promise<{ success: boolean; message: string; token?: string }> {
-  if (!appId || !appSecret) {
-    return {
-      success: false,
-      message: "请先填写 App ID 和 App Secret",
-    };
-  }
-
-  try {
-    // 先设置凭证到后端
-    await setFeishuCredentials(appId, appSecret);
-    
-    // 然后通过后端获取 token（后端会处理网络请求）
-    const token = await getFeishuAccessToken();
-    
-    return {
-      success: true,
-      message: "连接成功！已成功获取 tenant_access_token",
-      token: token.substring(0, 20) + "...", // 只显示前20个字符
-    };
-  } catch (error: any) {
-    // 格式化错误信息
-    let errorMessage = "连接测试失败";
-    
-    if (error && typeof error === "string") {
-      errorMessage = error;
-    } else if (error?.message) {
-      errorMessage = error.message;
-    }
-    
-    // 根据常见错误提供更友好的提示
-    if (errorMessage.includes("请先配置飞书凭证")) {
-      errorMessage = "凭证配置失败，请检查 App ID 和 App Secret";
-    } else if (errorMessage.includes("网络请求失败")) {
-      errorMessage = "网络连接失败，请检查网络连接或防火墙设置";
-    } else if (errorMessage.includes("获取 token 失败")) {
-      errorMessage = errorMessage.replace("获取 token 失败: ", "");
-    }
-    
-    return {
-      success: false,
-      message: errorMessage,
-    };
-  }
+  return await testFeishuConnection(appId, appSecret);
 }
 
 // 获取飞书 access token（从后端缓存获取）
@@ -183,11 +129,121 @@ export async function getAnswersData(
   return await invoke("get_answers_data", { appToken, tableId });
 }
 
-// 获取 Answers 表数据（结构化，带字段映射和容错处理）
+// Answers 表的结构化数据
+export interface Answer {
+  record_id: string;
+  question: string;
+  standard_answer: string;
+  enable_status: string;
+  scene: string;
+  tone: string;
+  product_name: string;
+  product_id: string;
+  raw_fields?: Record<string, any>; // 原始字段数据（用于调试）
+}
+
+// 获取答案列表（结构化数据）
 export async function listAnswers(
   appToken: string,
   tableId: string
 ): Promise<Answer[]> {
   return await invoke("list_answers", { appToken, tableId });
+}
+
+// AI 配置相关接口
+export interface AiConfig {
+  api_key: string;
+  base_url: string;
+  model_id: string;
+  request_timeout?: number;
+}
+
+// 设置 AI 配置
+export async function setAiConfig(config: {
+  api_key: string;
+  base_url: string;
+  model_id: string;
+  request_timeout?: number;
+}): Promise<string> {
+  return await invoke("set_ai_config", {
+    apiKey: config.api_key,
+    apiBase: config.base_url,
+    model: config.model_id,
+  });
+}
+
+// 获取 AI 配置
+export async function loadAiConfig(): Promise<AiConfig | null> {
+  try {
+    const config = await invoke<{ api_key: string; api_base: string; model: string } | null>("get_ai_config");
+    if (!config) {
+      return null;
+    }
+    return {
+      api_key: config.api_key,
+      base_url: config.api_base,
+      model_id: config.model,
+      request_timeout: 30000, // 默认 30 秒
+    };
+  } catch (error) {
+    console.error("加载 AI 配置失败:", error);
+    return null;
+  }
+}
+
+// 测试 AI 连接
+export async function testAiConnection(): Promise<{ success: boolean; message: string }> {
+  try {
+    const result = await invoke<string>("test_ai_connection");
+    return { success: true, message: result };
+  } catch (error: any) {
+    return { success: false, message: error?.toString() || "连接失败" };
+  }
+}
+
+// 更新答案到飞书
+export async function updateAnswerToFeishu(
+  appToken: string,
+  tableId: string,
+  recordId: string,
+  fields: Record<string, any>
+): Promise<string> {
+  return await invoke("update_answer_to_feishu", {
+    appToken,
+    tableId,
+    recordId,
+    fields,
+  });
+}
+
+// AI 优化答案
+export async function optimizeAnswerWithAI(
+  answer: string,
+  context?: string
+): Promise<string> {
+  return await invoke("optimize_answer_with_ai", { answer, context });
+}
+
+// AI 审核答案
+export async function reviewAnswerWithAI(
+  answer: string,
+  context?: string
+): Promise<string> {
+  return await invoke("review_answer_with_ai", { answer, context });
+}
+
+// AI 风险检测
+export async function checkAnswerRisk(
+  answer: string
+): Promise<{ hasRisk: boolean; reason: string }> {
+  try {
+    const result = await invoke<{ hasRisk: boolean; reason: string }>("check_answer_risk", { answer });
+    return result;
+  } catch (error: any) {
+    return {
+      hasRisk: false,
+      reason: error?.toString() || "检测失败",
+    };
+  }
 }
 

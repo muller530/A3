@@ -69,9 +69,18 @@ pub struct Answer {
     pub raw_fields: Option<HashMap<String, serde_json::Value>>, // 原始字段数据（用于调试）
 }
 
+// AI 配置结构
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AiConfig {
+    pub api_key: String,
+    pub api_base: String,
+    pub model: String,
+}
+
 // 存储飞书凭证（内存中，实际应该持久化）
 static CREDENTIALS: Mutex<Option<FeishuCredentials>> = Mutex::new(None);
 static ACCESS_TOKEN: Mutex<Option<(String, i64)>> = Mutex::new(None); // (token, expire_timestamp)
+static AI_CONFIG: Mutex<Option<AiConfig>> = Mutex::new(None);
 
 const FEISHU_API_BASE: &str = "https://open.feishu.cn/open-apis";
 
@@ -304,7 +313,7 @@ fn get_field_string(fields: &HashMap<String, serde_json::Value>, keys: &[&str]) 
                             }
                             // 如果数组不为空但没找到有效值，尝试提取第一个元素的字符串表示
                             if let Some(first) = arr.first() {
-                                if let serde_json::Value::Object(_obj) = first {
+                                if first.is_object() {
                                     // 尝试序列化为字符串（作为最后手段）
                                     if let Ok(json_str) = serde_json::to_string(first) {
                                         if !json_str.is_empty() && json_str != "{}" {
@@ -431,3 +440,306 @@ pub async fn list_answers(
     Ok(answers)
 }
 
+// AI 相关命令
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ChatMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ChatRequest {
+    model: String,
+    messages: Vec<ChatMessage>,
+    temperature: Option<f64>,
+    max_tokens: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ChatResponse {
+    choices: Option<Vec<ChatChoice>>,
+    error: Option<ChatError>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ChatChoice {
+    message: Option<ChatMessage>,
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ChatError {
+    message: String,
+    code: Option<String>,
+}
+
+async fn call_ai_api(prompt: String) -> Result<String, String> {
+    // 在 await 之前克隆配置数据
+    let (api_base, api_key, model) = {
+        let config_guard = AI_CONFIG.lock().unwrap();
+        let config = config_guard.as_ref().ok_or("请先配置 AI 设置")?;
+        (config.api_base.clone(), config.api_key.clone(), config.model.clone())
+    };
+
+    let client = reqwest::Client::new();
+    let url = format!("{}/chat/completions", api_base);
+
+    let messages = vec![ChatMessage {
+        role: "user".to_string(),
+        content: prompt,
+    }];
+
+    let request = ChatRequest {
+        model: model.clone(),
+        messages,
+        temperature: Some(0.7),
+        max_tokens: Some(2000),
+    };
+
+    let response = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&request)
+        .send()
+        .await
+        .map_err(|e| format!("网络请求失败: {}", e))?;
+
+    let status = response.status();
+    let response_text = response.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+
+    if !status.is_success() {
+        return Err(format!("API 请求失败 ({}): {}", status, response_text));
+    }
+
+    let chat_response: ChatResponse = serde_json::from_str(&response_text)
+        .map_err(|e| format!("解析响应失败: {}", e))?;
+
+    if let Some(error) = chat_response.error {
+        return Err(format!("API 错误: {}", error.message));
+    }
+
+    if let Some(choices) = chat_response.choices {
+        if let Some(choice) = choices.first() {
+            if let Some(message) = &choice.message {
+                return Ok(message.content.clone());
+            }
+        }
+    }
+
+    Err("API 响应格式错误".to_string())
+}
+
+#[tauri::command]
+pub async fn optimize_answer_with_ai(
+    answer: String,
+    context: Option<String>,
+) -> Result<String, String> {
+    let context_str = context.unwrap_or_default();
+    let prompt = format!(
+        r#"你是一位专业的客服回复优化专家。请优化以下客服回复，使其更加专业、友好、准确。
+
+上下文信息：
+{}
+
+原始客服回复：
+{}
+
+请按照以下格式输出：
+【最终客服回复】
+<优化后的客服回复内容>
+
+【内部优化说明】
+<优化说明，包括优化点、改进原因等>
+
+要求：
+1. 保持原意的准确性
+2. 语言更加专业和友好
+3. 结构清晰，易于理解
+4. 符合客服场景的语气要求"#,
+        context_str, answer
+    );
+
+    call_ai_api(prompt).await
+}
+
+#[tauri::command]
+pub async fn review_answer_with_ai(
+    answer: String,
+    context: Option<String>,
+) -> Result<String, String> {
+    let context_str = context.unwrap_or_default();
+    let prompt = format!(
+        r#"你是一位专业的客服回复审核专家。请审核以下客服回复，判断其是否合理、专业、准确。
+
+上下文信息：
+{}
+
+待审核的客服回复：
+{}
+
+请按照以下格式输出：
+【审核结论】= 合理 / 基本合理 / 需修改
+
+【专业判断说明】
+<详细说明专业判断的理由，包括回复的准确性、专业性、友好度等方面的评估>
+
+【潜在风险或注意点】
+<列出可能存在的风险、问题或需要注意的地方>
+
+【修改建议】（仅在"需修改"或"基本合理但可优化"时提供）
+<具体的修改建议>
+
+【需修改原因】（仅在"需修改"时提供）
+<详细说明为什么需要修改，指出具体的问题>
+
+【修改后推荐回复】（仅在"需修改"时提供）
+<提供修改后的推荐回复内容>
+
+【修改依据（专家原则）】
+<说明修改依据的专业原则和标准>
+
+要求：
+1. 严格审核回复的准确性和专业性
+2. 识别潜在的风险和问题
+3. 如需修改，必须提供明确的修改原因和推荐回复
+4. 判断要客观、专业"#,
+        context_str, answer
+    );
+
+    call_ai_api(prompt).await
+}
+
+#[tauri::command]
+pub async fn check_answer_risk(
+    answer: String,
+) -> Result<HashMap<String, serde_json::Value>, String> {
+    let prompt = format!(
+        r#"你是一位专业的风险检测专家。请快速检测以下客服回复是否存在风险。
+
+待检测的客服回复：
+{}
+
+请按照以下格式输出（必须严格遵循）：
+RISK = YES / NO
+REASON = 一句话原因说明
+
+要求：
+1. 如果存在风险（如误导、错误信息、不当表述等），输出 RISK = YES
+2. 如果无风险，输出 RISK = NO
+3. REASON 必须是一句话简要说明原因
+4. 只输出这两行，不要有其他内容"#,
+        answer
+    );
+
+    let result = call_ai_api(prompt).await?;
+    
+    let mut response = HashMap::new();
+    let mut has_risk = false;
+    let mut reason = String::new();
+
+    for line in result.lines() {
+        let line = line.trim();
+        if line.starts_with("RISK") {
+            if line.contains("YES") || line.contains("yes") || line.contains("Yes") {
+                has_risk = true;
+            }
+        } else if line.starts_with("REASON") {
+            if let Some(colon_idx) = line.find('=') {
+                reason = line[colon_idx + 1..].trim().to_string();
+            }
+        }
+    }
+
+    response.insert("hasRisk".to_string(), serde_json::json!(has_risk));
+    response.insert("reason".to_string(), serde_json::json!(reason));
+
+    Ok(response)
+}
+
+#[tauri::command]
+pub async fn set_ai_config(
+    api_key: String,
+    api_base: String,
+    model: String,
+) -> Result<String, String> {
+    let config = AiConfig {
+        api_key,
+        api_base,
+        model,
+    };
+    *AI_CONFIG.lock().unwrap() = Some(config);
+    Ok("AI 配置已保存".to_string())
+}
+
+#[tauri::command]
+pub async fn get_ai_config() -> Result<Option<AiConfig>, String> {
+    Ok(AI_CONFIG.lock().unwrap().clone())
+}
+
+#[tauri::command]
+pub async fn test_ai_connection() -> Result<String, String> {
+    // 在 await 之前检查配置
+    {
+        let config_guard = AI_CONFIG.lock().unwrap();
+        if config_guard.is_none() {
+            return Err("请先配置 AI 设置".to_string());
+        }
+    }
+
+    let prompt = "请回复：连接成功".to_string();
+    let result = call_ai_api(prompt).await?;
+    Ok(format!("AI 连接测试成功！模型回复：{}", result))
+}
+
+#[tauri::command]
+pub async fn update_answer_to_feishu(
+    app_token: String,
+    table_id: String,
+    record_id: String,
+    fields: HashMap<String, serde_json::Value>,
+) -> Result<String, String> {
+    let token = get_feishu_access_token().await?;
+    let client = reqwest::Client::new();
+    let url = format!(
+        "{}/bitable/v1/apps/{}/tables/{}/records/{}",
+        FEISHU_API_BASE, app_token, table_id, record_id
+    );
+
+    // 构建更新请求体
+    let update_body = serde_json::json!({
+        "fields": fields
+    });
+
+    let response = client
+        .put(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Content-Type", "application/json")
+        .json(&update_body)
+        .send()
+        .await
+        .map_err(|e| format!("网络请求失败: {}", e))?;
+
+    let status = response.status();
+    let response_text = response.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+
+    if !status.is_success() {
+        return Err(format!("更新失败 ({}): {}", status, response_text));
+    }
+
+    // 解析响应
+    let result: serde_json::Value = serde_json::from_str(&response_text)
+        .map_err(|e| format!("解析响应失败: {}", e))?;
+
+    if let Some(code) = result.get("code").and_then(|v| v.as_i64()) {
+        if code != 0 {
+            let msg = result.get("msg")
+                .and_then(|v| v.as_str())
+                .unwrap_or("未知错误");
+            return Err(format!("更新失败: {}", msg));
+        }
+    }
+
+    Ok("更新成功".to_string())
+}

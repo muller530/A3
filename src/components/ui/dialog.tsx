@@ -20,8 +20,12 @@ const DialogContext = React.createContext<{
 })
 
 const Dialog = ({ open = false, onOpenChange, children }: DialogProps) => {
+  const handleOpenChange = React.useCallback((newOpen: boolean) => {
+    onOpenChange?.(newOpen);
+  }, [onOpenChange]);
+
   return (
-    <DialogContext.Provider value={{ open, onOpenChange }}>
+    <DialogContext.Provider value={{ open, onOpenChange: handleOpenChange }}>
       {children}
     </DialogContext.Provider>
   )
