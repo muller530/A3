@@ -6,7 +6,7 @@ import { extractBitableInfo } from "../lib/utils";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
-import { LogOut, TestTube2, CheckCircle2, XCircle, Loader2, Link2 } from "lucide-react";
+import { TestTube2, CheckCircle2, XCircle, Loader2, Link2 } from "lucide-react";
 
 // 定义需要的表格列表
 const REQUIRED_TABLES = [
@@ -65,7 +65,7 @@ export default function Config() {
     message: string;
   } | null>(null);
   
-  const { role, logout } = useAuth();
+  const { role } = useAuth();
   const navigate = useNavigate();
 
   // 从本地存储加载已保存的配置
@@ -284,11 +284,6 @@ export default function Config() {
     }
   };
 
-  const handleLogout = () => {
-    logout();
-    navigate("/login");
-  };
-
   // AI 配置相关处理函数
   const handleTestAiConnection = async () => {
     if (!aiApiKey || !aiBaseUrl || !aiModelId) {
@@ -360,17 +355,10 @@ export default function Config() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 p-8">
+    <div className="p-8">
       <div className="max-w-3xl mx-auto">
-        <div className="flex justify-between items-center mb-6">
+        <div className="mb-6">
           <h1 className="text-2xl font-bold">设置中心</h1>
-          <div className="flex items-center gap-4">
-            <span className="text-sm text-gray-600">角色: {role}</span>
-            <Button variant="outline" onClick={handleLogout}>
-              <LogOut className="w-4 h-4 mr-2" />
-              退出登录
-            </Button>
-          </div>
         </div>
 
         <Card>

@@ -1,7 +1,8 @@
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import Login from "./components/Login";
-import Config from "./components/Config";
+import HomePage from "./pages/HomePage";
+import SettingsPage from "./pages/SettingsPage";
 import AnswerList from "./components/AnswerList";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -14,10 +15,26 @@ function AppRoutes() {
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route
+        path="/"
+        element={
+          <ProtectedRoute>
+            <HomePage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/settings"
+        element={
+          <ProtectedRoute>
+            <SettingsPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
         path="/config"
         element={
           <ProtectedRoute>
-            <Config />
+            <Navigate to="/settings" replace />
           </ProtectedRoute>
         }
       />
@@ -29,7 +46,6 @@ function AppRoutes() {
           </ProtectedRoute>
         }
       />
-      <Route path="/" element={<Navigate to="/login" replace />} />
     </Routes>
   );
 }
@@ -37,7 +53,12 @@ function AppRoutes() {
 function App() {
   return (
     <AuthProvider>
-      <BrowserRouter>
+      <BrowserRouter
+        future={{
+          v7_startTransition: true,
+          v7_relativeSplatPath: true,
+        }}
+      >
         <AppRoutes />
       </BrowserRouter>
     </AuthProvider>

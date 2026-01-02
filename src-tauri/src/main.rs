@@ -20,6 +20,8 @@ fn main() {
             commands::get_ai_config,
             commands::test_ai_connection,
             commands::update_answer_to_feishu,
+            commands::get_bitable_record,
+            commands::open_external_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

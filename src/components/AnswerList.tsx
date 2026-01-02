@@ -1,13 +1,14 @@
 import { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
-import { listAnswers, loadFeishuConfig, getBitableTables, Answer, BitableTable, optimizeAnswerWithAI, reviewAnswerWithAI, checkAnswerRisk, updateAnswerToFeishu } from "../lib/api";
-import { extractOptimizedAnswer, extractReviewResult, ReviewResult, isValidFeishuRecordId, getFeishuRecordId } from "../lib/utils";
+import { listAnswers, loadFeishuConfig, getBitableTables, Answer, optimizeAnswerWithAI, reviewAnswerWithAI, checkAnswerRisk, updateAnswerToFeishu, saveAnswersCache, loadAnswersCache, getBitableRecord, AnswerRecord, getAnswersData, openExternalUrl } from "../lib/api";
+import { extractOptimizedAnswer, extractReviewResult, ReviewResult, getFeishuRecordId } from "../lib/utils";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "./ui/dialog";
-import { LogOut, Search, Eye, Loader2, AlertCircle, FileText, RefreshCw, Sparkles, Shield, AlertTriangle, CheckCircle2, Copy, ThumbsUp, ThumbsDown, Edit } from "lucide-react";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./ui/dialog";
+import { Search, Eye, Loader2, AlertCircle, FileText, RefreshCw, Sparkles, Shield, AlertTriangle, CheckCircle2, Copy, ThumbsUp, ThumbsDown, Edit, ChevronDown, ChevronUp, ExternalLink } from "lucide-react";
+import Navigation from "./Navigation";
 
 type LoadingState = "idle" | "loading" | "success" | "error";
 
@@ -20,7 +21,6 @@ export default function AnswerList() {
   const [selectedAnswer, setSelectedAnswer] = useState<Answer | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [showAll, setShowAll] = useState(false); // 调试模式：显示所有数据
-  const [tables, setTables] = useState<BitableTable[]>([]); // 表格列表
   const [selectedTableId, setSelectedTableId] = useState<string>(""); // 选中的表格ID
   const [optimizing, setOptimizing] = useState(false); // AI 优化中
   const [reviewing, setReviewing] = useState(false); // AI 审核中
@@ -34,20 +34,126 @@ export default function AnswerList() {
   const [showDraftEditor, setShowDraftEditor] = useState(false); // 是否显示草稿编辑器
   const [aiRatings, setAiRatings] = useState<Record<string, { type: "optimize" | "review"; rating: "up" | "down" }>>({}); // AI 评价
   const [copySuccess, setCopySuccess] = useState<string | null>(null); // 复制成功提示
-  const { role, logout } = useAuth();
+  const [lastSyncTime, setLastSyncTime] = useState<number | null>(null); // 最后同步时间
+  const [productInfo, setProductInfo] = useState<AnswerRecord | null>(null); // 产品信息
+  const [loadingProductInfo, setLoadingProductInfo] = useState(false); // 加载产品信息中
+  const [productTableId, setProductTableId] = useState<string | null>(null); // 产品表格ID
+  const [productInfoExpanded, setProductInfoExpanded] = useState(false); // 产品信息是否展开
+  const { role } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
 
-  // 页面加载时不自动同步数据，需要用户手动点击"同步数据"按钮
-  // useEffect(() => {
-  //   loadAnswersData();
-  // }, []);
+  // 页面加载时自动从缓存加载数据
+  useEffect(() => {
+    const loadCachedData = async () => {
+      const config = loadFeishuConfig();
+      if (!config || !config.appToken) {
+        return;
+      }
+
+      const tableId = selectedTableId || config.tableId;
+      if (!tableId) {
+        // 如果没有表格ID，先加载表格列表
+        await loadTables();
+        return;
+      }
+
+      // 尝试从缓存加载数据
+      const cache = loadAnswersCache(tableId);
+      if (cache && cache.data.length > 0) {
+        setAnswers(cache.data);
+        setLoadingState("success");
+        setLastSyncTime(cache.timestamp);
+      } else {
+        setLoadingState("idle");
+        setLastSyncTime(null);
+      }
+    };
+
+    loadCachedData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTableId]);
+
+  // 保存搜索历史到本地存储
+  const saveSearchHistory = (term: string) => {
+    if (!term.trim()) return;
+    
+    try {
+      const STORAGE_KEY = "search_history";
+      const MAX_HISTORY_ITEMS = 12;
+      const stored = localStorage.getItem(STORAGE_KEY);
+      let history: Array<{ term: string; count: number; lastUsed: number }> = stored ? JSON.parse(stored) : [];
+      
+      const existingIndex = history.findIndex(item => item.term === term);
+      const now = Date.now();
+      
+      if (existingIndex >= 0) {
+        history[existingIndex].count += 1;
+        history[existingIndex].lastUsed = now;
+      } else {
+        history.push({
+          term,
+          count: 1,
+          lastUsed: now,
+        });
+      }
+      
+      history = history
+        .sort((a, b) => {
+          if (b.count !== a.count) return b.count - a.count;
+          return b.lastUsed - a.lastUsed;
+        })
+        .slice(0, MAX_HISTORY_ITEMS);
+      
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(history));
+    } catch (error) {
+      console.error("Failed to save search history:", error);
+    }
+  };
+
+  // 如果从首页跳转过来并带有搜索关键词或选中答案ID
+  useEffect(() => {
+    const state = location.state as { searchTerm?: string; selectedAnswerId?: string; skipSaveHistory?: boolean } | null;
+    
+    // 处理搜索关键词
+    if (state?.searchTerm) {
+      const term = state.searchTerm.trim();
+      setSearchTerm(term);
+      // 如果是从首页跳转过来的，不重复保存搜索历史（首页已经保存过了）
+      // 只有在答案列表页面直接搜索时才保存
+      if (!state.skipSaveHistory) {
+        saveSearchHistory(term);
+      }
+      // 清除 state，避免重复应用
+      window.history.replaceState({}, document.title);
+    }
+    
+    // 处理选中答案ID
+    if (state?.selectedAnswerId && answers.length > 0) {
+      const answer = answers.find(a => a.record_id === state.selectedAnswerId);
+      if (answer) {
+        setSelectedAnswer(answer);
+        setDialogOpen(true);
+        // 重置 AI 结果和草稿
+        setOptimizedResult(null);
+        setReviewResult(null);
+        setRiskResult(null);
+        setSubmitMessage("");
+        setDraftContent("");
+        setShowDraftEditor(false);
+        // 清除 state，避免重复打开
+        window.history.replaceState({}, document.title);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.state, answers]);
 
   // 搜索和过滤
   useEffect(() => {
     filterAnswers();
   }, [searchTerm, answers, showAll]);
 
-  // 加载表格列表
+  // 加载表格列表（用于查找产品表格和设置答案表格）
   const loadTables = async () => {
     try {
       const config = loadFeishuConfig();
@@ -55,7 +161,6 @@ export default function AnswerList() {
         return;
       }
       const tablesList = await getBitableTables(config.appToken);
-      setTables(tablesList);
       
       // 如果还没有选中表格，尝试自动选择 Answers 表
       if (!selectedTableId && tablesList.length > 0) {
@@ -69,6 +174,28 @@ export default function AnswerList() {
         } else if (config.tableId) {
           // 使用配置中的 tableId
           setSelectedTableId(config.tableId);
+        }
+      }
+      
+      // 从配置中查找产品表格
+      if (config.tables && config.tables.length > 0) {
+        const productTableConfig = config.tables.find(
+          (t) => t.name === "products" || t.name.toLowerCase().includes("product")
+        );
+        if (productTableConfig) {
+          setProductTableId(productTableConfig.tableId);
+        }
+      }
+      
+      // 如果没有配置，尝试通过名称匹配查找（兼容旧版本）
+      if (!productTableId) {
+        const productTable = tablesList.find(
+          (t) => t.name.toLowerCase().includes("product") || 
+                t.name.toLowerCase().includes("产品") ||
+                t.name.toLowerCase().includes("products")
+        );
+        if (productTable) {
+          setProductTableId(productTable.table_id);
         }
       }
     } catch (error) {
@@ -109,6 +236,10 @@ export default function AnswerList() {
       const data = await listAnswers(config.appToken, tableId);
       setAnswers(data);
       setLoadingState("success");
+      
+      // 保存到本地缓存
+      saveAnswersCache(tableId, data);
+      setLastSyncTime(Date.now());
       
       // 调试：输出字段信息到控制台
       if (data.length > 0 && data[0].raw_fields) {
@@ -209,6 +340,100 @@ export default function AnswerList() {
     }
   }, [selectedAnswer?.record_id]);
 
+  // 加载产品信息
+  useEffect(() => {
+    const loadProductInfo = async () => {
+      if (!selectedAnswer?.product_id || selectedAnswer.product_id === "-" || !productTableId) {
+        setProductInfo(null);
+        setProductInfoExpanded(false);
+        return;
+      }
+
+      // 切换产品时重置展开状态
+      setProductInfoExpanded(false);
+
+      setLoadingProductInfo(true);
+      try {
+        const config = loadFeishuConfig();
+        if (!config || !config.appToken) {
+          setProductInfo(null);
+          return;
+        }
+
+        const productId = selectedAnswer.product_id;
+        let productRecord: AnswerRecord | null = null;
+
+        // 方法1: 如果 product_id 以 "rec" 开头，直接作为 record_id 使用
+        if (productId.startsWith("rec")) {
+          try {
+            productRecord = await getBitableRecord(
+              config.appToken,
+              productTableId,
+              productId
+            );
+          } catch (error) {
+            console.log("直接使用 product_id 作为 record_id 失败，尝试通过字段查找");
+          }
+        }
+
+        // 方法2: 如果方法1失败或 product_id 不是 record_id 格式，获取所有产品记录并查找
+        if (!productRecord) {
+          try {
+            // 获取产品表格的所有原始记录
+            const allProducts = await getAnswersData(config.appToken, productTableId);
+            
+            // 通过多个可能的字段名查找匹配的产品
+            // 可能的字段名：产品ID、product_id、编号、ID、产品编号等
+            const possibleFieldNames = ["产品ID", "product_id", "编号", "ID", "产品编号", "产品代码"];
+            
+            for (const product of allProducts) {
+              // 检查每个可能的字段名
+              for (const fieldName of possibleFieldNames) {
+                const fieldValue = product.fields[fieldName];
+                if (fieldValue !== undefined && fieldValue !== null) {
+                  // 提取字段值（可能是字符串、数字或对象）
+                  let valueStr = "";
+                  if (typeof fieldValue === "string") {
+                    valueStr = fieldValue;
+                  } else if (typeof fieldValue === "number") {
+                    valueStr = fieldValue.toString();
+                  } else if (Array.isArray(fieldValue) && fieldValue.length > 0) {
+                    const firstItem = fieldValue[0];
+                    if (typeof firstItem === "string") {
+                      valueStr = firstItem;
+                    } else if (typeof firstItem === "object" && firstItem !== null) {
+                      valueStr = firstItem.text || firstItem.name || String(firstItem);
+                    }
+                  } else if (typeof fieldValue === "object") {
+                    valueStr = fieldValue.text || fieldValue.name || String(fieldValue);
+                  }
+                  
+                  // 如果字段值匹配 product_id，直接使用该记录
+                  if (valueStr === productId || valueStr.trim() === productId.trim()) {
+                    productRecord = product;
+                    break;
+                  }
+                }
+              }
+              if (productRecord) break;
+            }
+          } catch (error) {
+            console.error("通过字段查找产品失败:", error);
+          }
+        }
+
+        setProductInfo(productRecord);
+      } catch (error: any) {
+        console.error("加载产品信息失败:", error);
+        setProductInfo(null);
+      } finally {
+        setLoadingProductInfo(false);
+      }
+    };
+
+    loadProductInfo();
+  }, [selectedAnswer?.product_id, productTableId]);
+
   // 保存评价
   const saveRating = (type: "optimize" | "review", rating: "up" | "down") => {
     if (!selectedAnswer?.record_id) return;
@@ -261,6 +486,8 @@ export default function AnswerList() {
     setSubmitMessage("");
     setDraftContent("");
     setShowDraftEditor(false);
+    // 重置产品信息展开状态
+    setProductInfoExpanded(false);
   };
 
   const handleOptimize = async () => {
@@ -503,106 +730,68 @@ export default function AnswerList() {
     }
   };
 
-  const handleLogout = () => {
-    logout();
-    navigate("/login");
-  };
-
   const handleGoToConfig = () => {
-    navigate("/config");
+    navigate("/settings");
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 p-8">
-      <div className="max-w-7xl mx-auto">
-        <div className="flex justify-between items-center mb-6">
-          <h1 className="text-2xl font-bold">知识库（Answers）</h1>
-          <div className="flex items-center gap-4">
-            <span className="text-sm text-gray-600">角色: {role}</span>
-            <Button variant="outline" onClick={handleLogout}>
-              <LogOut className="w-4 h-4 mr-2" />
-              退出登录
-            </Button>
-          </div>
-        </div>
-
-        {/* 表格选择器 */}
-        {tables.length > 0 && (
-          <Card className="mb-6">
-            <CardHeader>
-              <CardTitle>选择表格</CardTitle>
-              <CardDescription>请选择 Answers 表格（包含"问题"、"标准回答"、"状态"等字段）</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-2">
-                {tables.map((table) => (
-                  <label
-                    key={table.table_id}
-                    className={`flex items-center gap-2 p-3 border rounded-lg cursor-pointer transition-colors ${
-                      selectedTableId === table.table_id
-                        ? "border-blue-500 bg-blue-50"
-                        : "border-gray-200 hover:bg-gray-50"
-                    }`}
-                  >
-                    <input
-                      type="radio"
-                      name="table"
-                      value={table.table_id}
-                      checked={selectedTableId === table.table_id}
-                      onChange={(e) => setSelectedTableId(e.target.value)}
-                      className="w-4 h-4"
-                    />
-                    <div className="flex-1">
-                      <div className="font-medium">{table.name}</div>
-                      <div className="text-xs text-gray-500 font-mono">{table.table_id}</div>
-                    </div>
-                    {(table.name.toLowerCase().includes("answer") || 
-                      table.name.toLowerCase().includes("答案")) && (
-                      <span className="text-xs px-2 py-1 bg-green-100 text-green-700 rounded">
-                        推荐
-                      </span>
-                    )}
-                  </label>
-                ))}
-              </div>
-            </CardContent>
-          </Card>
-        )}
-
-        <Card>
-          <CardHeader>
-            <div className="flex justify-between items-start">
-              <div>
-                <CardTitle>答案列表</CardTitle>
-                <CardDescription>
-                  {loadingState === "success" && (
-                    <>
-                      共 {answers.length} 条数据
-                      {!showAll && (
-                        <>，其中状态为"启用"的 {answers.filter(a => {
-                          const status = a.enable_status.toLowerCase().trim();
-                          return (
-                            status === "启用" ||
-                            status === "enable" ||
-                            status === "enabled" ||
-                            status === "true" ||
-                            status === "1" ||
-                            status === "是" ||
-                            status === "yes" ||
-                            status === "已启用" ||
-                            status === "启用中" ||
-                            status === "active"
-                          );
-                        }).length} 条</>
-                      )}
-                      {showAll && "（显示全部）"}
-                      {searchTerm && `，搜索后显示 ${filteredAnswers.length} 条`}
-                    </>
+    <div className="min-h-screen relative">
+      {/* 背景装饰 */}
+      <div className="fixed inset-0 bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 -z-10"></div>
+      
+      <Navigation />
+      
+      {/* 固定搜索区域 */}
+      <div className="sticky top-16 z-40 bg-white/80 backdrop-blur-xl border-b border-gray-200/50 shadow-sm">
+        <div className="max-w-7xl mx-auto px-8 py-4">
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex-1">
+              <h1 className="text-2xl font-bold gradient-text mb-1">知识库</h1>
+              {loadingState === "success" && (
+                <p className="text-sm text-gray-600">
+                  共 {answers.length} 条数据
+                  {!showAll && (
+                    <>，其中状态为"启用"的 {answers.filter(a => {
+                      const status = a.enable_status.toLowerCase().trim();
+                      return (
+                        status === "启用" ||
+                        status === "enable" ||
+                        status === "enabled" ||
+                        status === "true" ||
+                        status === "1" ||
+                        status === "是" ||
+                        status === "yes" ||
+                        status === "已启用" ||
+                        status === "启用中" ||
+                        status === "active"
+                      );
+                    }).length} 条</>
                   )}
-                  {loadingState === "idle" && '点击"同步数据"按钮从飞书拉取最新数据'}
-                  {loadingState === "error" && '数据加载失败，请点击"同步数据"重试'}
-                </CardDescription>
-              </div>
+                  {showAll && "（显示全部）"}
+                  {searchTerm && `，搜索后显示 ${filteredAnswers.length} 条`}
+                </p>
+              )}
+            </div>
+            
+            {/* 搜索框和同步按钮 */}
+            <div className="flex items-center gap-3 flex-1 max-w-md">
+              {loadingState === "success" && (
+                <div className="relative flex-1">
+                  <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 text-gray-400 w-5 h-5 z-10" />
+                  <Input
+                    type="text"
+                    placeholder="搜索问题、标准回答或对应产品..."
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && searchTerm.trim()) {
+                        saveSearchHistory(searchTerm.trim());
+                      }
+                    }}
+                    className="pl-12 h-12 bg-white/90 backdrop-blur-sm border-2 border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 rounded-xl shadow-sm transition-all duration-200"
+                  />
+                </div>
+              )}
               <Button
                 onClick={loadAnswersData}
                 disabled={loadingState === "loading" || !selectedTableId}
@@ -622,39 +811,58 @@ export default function AnswerList() {
                 )}
               </Button>
             </div>
+          </div>
+          
+          {/* 搜索框下方的选项 */}
+          {loadingState === "success" && (
+            <div className="flex items-center justify-between mt-3 pt-3 border-t border-gray-200/50">
+              <label className="flex items-center gap-2 cursor-pointer text-sm">
+                <input
+                  type="checkbox"
+                  checked={showAll}
+                  onChange={(e) => setShowAll(e.target.checked)}
+                  className="w-4 h-4"
+                />
+                <span className="text-gray-600">显示所有数据（包括非启用状态）</span>
+              </label>
+              {lastSyncTime && (
+                <span className="text-xs text-gray-500">
+                  最后同步时间：{new Date(lastSyncTime).toLocaleString("zh-CN")}
+                </span>
+              )}
+              {answers.length > 0 && answers[0].enable_status === "-" && (
+                <div className="text-xs text-amber-600 bg-amber-50 px-3 py-1 rounded border border-amber-200">
+                  <span className="font-medium">提示：</span> 状态字段未识别，请点击任意记录"查看详情"→展开"调试信息"查看原始字段名
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+      
+      <div className="p-8">
+        <div className="max-w-7xl mx-auto">
+        <Card>
+          <CardHeader>
+            <div className="flex justify-between items-start">
+              <div>
+                <CardTitle>知识库</CardTitle>
+                <CardDescription>
+                  {loadingState === "idle" && (
+                    <>
+                      {lastSyncTime ? (
+                        <>已加载缓存数据，点击"同步数据"获取最新数据</>
+                      ) : (
+                        <>点击"同步数据"按钮从飞书拉取最新数据</>
+                      )}
+                    </>
+                  )}
+                  {loadingState === "error" && '数据加载失败，请点击"同步数据"重试'}
+                </CardDescription>
+              </div>
+            </div>
           </CardHeader>
           <CardContent>
-            {/* 搜索框和调试按钮 */}
-            {loadingState === "success" && (
-              <div className="mb-4 space-y-2">
-                <div className="relative">
-                  <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
-                  <Input
-                    type="text"
-                    placeholder="搜索问题、标准回答或对应产品..."
-                    value={searchTerm}
-                    onChange={(e) => setSearchTerm(e.target.value)}
-                    className="pl-10"
-                  />
-                </div>
-                <div className="flex items-center justify-between">
-                  <label className="flex items-center gap-2 cursor-pointer text-sm">
-                    <input
-                      type="checkbox"
-                      checked={showAll}
-                      onChange={(e) => setShowAll(e.target.checked)}
-                      className="w-4 h-4"
-                    />
-                    <span className="text-gray-600">显示所有数据（包括非启用状态）</span>
-                  </label>
-                  {answers.length > 0 && answers[0].enable_status === "-" && (
-                    <div className="text-xs text-amber-600 bg-amber-50 px-3 py-1 rounded border border-amber-200">
-                      <span className="font-medium">提示：</span> 状态字段未识别，请点击任意记录"查看详情"→展开"调试信息"查看原始字段名
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
 
             {/* 初始态：提示用户同步数据 */}
             {loadingState === "idle" && (
@@ -692,7 +900,7 @@ export default function AnswerList() {
                     重试
                   </Button>
                   <Button onClick={handleGoToConfig}>
-                    前往配置中心
+                    前往设置
                   </Button>
                 </div>
               </div>
@@ -719,11 +927,11 @@ export default function AnswerList() {
 
             {/* 成功态：列表展示 */}
             {loadingState === "success" && filteredAnswers.length > 0 && (
-              <div className="space-y-3">
+              <div className="space-y-4">
                 {filteredAnswers.map((answer) => (
                   <div
                     key={answer.record_id}
-                    className="border rounded-lg p-4 hover:bg-gray-50 transition-colors"
+                    className="border border-white/40 rounded-xl p-5 bg-white/60 backdrop-blur-sm hover:bg-white/80 hover:shadow-lg hover:shadow-black/5 transition-all duration-200 cursor-pointer group"
                   >
                     <div className="flex justify-between items-start">
                       <div className="flex-1">
@@ -779,147 +987,394 @@ export default function AnswerList() {
 
         {/* 详情对话框 */}
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-          <DialogContent className="max-w-3xl max-h-[80vh] overflow-y-auto">
-            <DialogHeader>
-              <DialogTitle>答案详情</DialogTitle>
-              <DialogDescription>查看完整的答案信息</DialogDescription>
-            </DialogHeader>
+          <DialogContent className="max-w-5xl max-h-[90vh] overflow-hidden flex flex-col p-0">
+            {/* 顶部标题栏 - 带渐变 */}
+            <div className="relative bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 px-8 py-6">
+              <div className="absolute inset-0 bg-gradient-to-r from-blue-600/90 via-indigo-600/90 to-purple-600/90"></div>
+              <DialogHeader className="relative z-10">
+                <DialogTitle className="text-2xl font-bold text-white">知识库详情</DialogTitle>
+              </DialogHeader>
+            </div>
+            
+            {/* 内容区域 - 可滚动 */}
+            <div className="flex-1 overflow-y-auto px-8 py-6">
             {selectedAnswer && (
-              <div className="space-y-4">
-                <div>
-                  <div className="font-medium text-sm text-gray-700 mb-1">问题</div>
-                  <div className="text-sm text-gray-900 bg-gray-50 p-3 rounded-md">
-                    {selectedAnswer.question}
+              <div className="space-y-6">
+                {/* 问题卡片 - 突出显示 */}
+                <div className="relative">
+                  <div className="absolute inset-0 bg-gradient-to-r from-blue-500/10 via-indigo-500/10 to-purple-500/10 rounded-xl blur-xl"></div>
+                  <div className="relative bg-gradient-to-br from-blue-50 to-indigo-50 rounded-xl p-6 border border-blue-100/50 shadow-lg">
+                    <div className="flex items-center gap-2 mb-3">
+                      <div className="w-1 h-6 bg-gradient-to-b from-blue-600 to-indigo-600 rounded-full"></div>
+                      <div className="text-xs font-semibold text-blue-600 uppercase tracking-wider">问题</div>
+                    </div>
+                    <div className="text-lg font-medium text-gray-900 leading-relaxed">
+                      {selectedAnswer.question}
+                    </div>
                   </div>
                 </div>
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <div className="font-medium text-sm text-gray-700">标准回答</div>
-                    <Button
-                      variant={copySuccess === "标准回答" ? "default" : "outline"}
-                      size="sm"
-                      onClick={() => copyToClipboard(selectedAnswer.standard_answer, "标准回答")}
-                      className={`h-7 transition-all ${
-                        copySuccess === "标准回答" 
-                          ? "bg-green-500 hover:bg-green-600 text-white border-green-500" 
-                          : ""
-                      }`}
-                    >
-                      {copySuccess === "标准回答" ? (
+
+                {/* 标准回答卡片 - 主要内容 */}
+                <div className="relative">
+                  <div className="absolute inset-0 bg-gradient-to-r from-indigo-500/10 via-purple-500/10 to-pink-500/10 rounded-xl blur-xl"></div>
+                  <div className="relative bg-white rounded-xl p-6 border border-gray-200/50 shadow-lg">
+                    <div className="flex items-center justify-between mb-4">
+                      <div className="flex items-center gap-2">
+                        <div className="w-1 h-6 bg-gradient-to-b from-indigo-600 to-purple-600 rounded-full"></div>
+                        <div className="text-xs font-semibold text-indigo-600 uppercase tracking-wider">标准回答</div>
+                      </div>
+                      <Button
+                        variant={copySuccess === "标准回答" ? "default" : "outline"}
+                        size="sm"
+                        onClick={() => copyToClipboard(selectedAnswer.standard_answer, "标准回答")}
+                        className={`h-8 transition-all ${
+                          copySuccess === "标准回答" 
+                            ? "bg-green-500 hover:bg-green-600 text-white border-green-500 shadow-md" 
+                            : "border-gray-300 hover:border-indigo-400 hover:text-indigo-600"
+                        }`}
+                      >
+                        {copySuccess === "标准回答" ? (
+                          <>
+                            <CheckCircle2 className="w-3.5 h-3.5 mr-1.5" />
+                            已复制
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3.5 h-3.5 mr-1.5" />
+                            复制
+                          </>
+                        )}
+                      </Button>
+                    </div>
+                    <div className="text-base text-gray-800 leading-relaxed whitespace-pre-wrap bg-gray-50/50 rounded-lg p-4 border border-gray-100">
+                      {selectedAnswer.standard_answer}
+                    </div>
+                  </div>
+                </div>
+
+                {/* 产品信息列表 */}
+                {selectedAnswer.product_id && selectedAnswer.product_id !== "-" ? (
+                  <div className="relative">
+                    <div className="absolute inset-0 bg-gradient-to-r from-blue-500/10 via-indigo-500/10 to-purple-500/10 rounded-xl blur-xl"></div>
+                    <div className="relative bg-white rounded-xl p-6 border border-gray-200/50 shadow-lg">
+                      <div className="flex items-center justify-between mb-4">
+                        <div className="flex items-center gap-2">
+                          <div className="w-1 h-6 bg-gradient-to-b from-blue-600 to-indigo-600 rounded-full"></div>
+                          <div className="text-xs font-semibold text-blue-600 uppercase tracking-wider">产品信息</div>
+                          <div className="text-xs text-gray-500 ml-2">
+                            产品ID: <span className="font-mono">{selectedAnswer.product_id}</span>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {productInfo && productTableId && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={async () => {
+                                const config = loadFeishuConfig();
+                                if (config?.appToken && productInfo?.record_id) {
+                                  // 构建飞书表格链接
+                                  const feishuUrl = `https://bytedance.feishu.cn/base/${config.appToken}?table=${productTableId}&view=default&recordId=${productInfo.record_id}`;
+                                  // 使用 Tauri shell 在默认浏览器中打开链接
+                                  try {
+                                    await openExternalUrl(feishuUrl);
+                                  } catch (error) {
+                                    console.error("打开链接失败:", error);
+                                    // 降级方案：使用 window.open
+                                    window.open(feishuUrl, '_blank');
+                                  }
+                                }
+                              }}
+                              className="h-8 text-xs"
+                            >
+                              <ExternalLink className="w-3.5 h-3.5 mr-1.5" />
+                              查看飞书详细信息
+                            </Button>
+                          )}
+                          {productInfo && productInfo.fields && Object.keys(productInfo.fields).filter(key => key !== "record_id").length > 0 && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => setProductInfoExpanded(!productInfoExpanded)}
+                              className="h-8 text-xs"
+                            >
+                              {productInfoExpanded ? (
+                                <>
+                                  <ChevronUp className="w-3.5 h-3.5 mr-1.5" />
+                                  折叠
+                                </>
+                              ) : (
+                                <>
+                                  <ChevronDown className="w-3.5 h-3.5 mr-1.5" />
+                                  展开
+                                </>
+                              )}
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                      {loadingProductInfo ? (
+                        <div className="flex items-center justify-center py-8">
+                          <Loader2 className="w-5 h-5 animate-spin text-blue-600 mr-2" />
+                          <span className="text-sm text-gray-600">加载产品信息中...</span>
+                        </div>
+                      ) : productInfo && productInfo.fields ? (
                         <>
-                          <CheckCircle2 className="w-3 h-3 mr-1" />
-                          已复制
+                          {productInfoExpanded && (
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+                              {Object.entries(productInfo.fields)
+                                .filter(([key]) => {
+                                  // 过滤掉 record_id、PRODUCT_ID、ANSWERS 字段
+                                  const upperKey = key.toUpperCase();
+                                  return key !== "record_id" && 
+                                         upperKey !== "PRODUCT_ID" && 
+                                         upperKey !== "ANSWERS" &&
+                                         key !== "product_id" &&
+                                         key !== "answers";
+                                })
+                                .map(([fieldName, fieldValue]) => {
+                                  // 检测是否为图片字段（attachment 类型）
+                                  const isImageField = Array.isArray(fieldValue) && fieldValue.length > 0 && 
+                                    fieldValue.some((item: any) => 
+                                      item && typeof item === "object" && 
+                                      (item.type === "image" || item.token || item.url || item.name?.match(/\.(jpg|jpeg|png|gif|webp)$/i))
+                                    );
+
+                                  // 格式化字段值
+                                  let displayValue = "";
+                                  let isAttachment = false;
+                                  
+                                  if (fieldValue === null || fieldValue === undefined) {
+                                    displayValue = "-";
+                                  } else if (typeof fieldValue === "string") {
+                                    displayValue = fieldValue;
+                                  } else if (typeof fieldValue === "number") {
+                                    displayValue = fieldValue.toString();
+                                  } else if (typeof fieldValue === "boolean") {
+                                    displayValue = fieldValue ? "是" : "否";
+                                  } else if (Array.isArray(fieldValue)) {
+                                    // 处理数组类型（如选项字段、附件字段）
+                                    if (fieldValue.length === 0) {
+                                      displayValue = "-";
+                                    } else {
+                                      // 检查是否为附件数组
+                                      if (isImageField || fieldValue.some((item: any) => item && typeof item === "object" && (item.token || item.url))) {
+                                        isAttachment = true;
+                                        displayValue = fieldValue.map((item: any) => {
+                                          if (typeof item === "string") return item;
+                                          if (typeof item === "object" && item !== null) {
+                                            return item.name || item.text || item.url || JSON.stringify(item);
+                                          }
+                                          return String(item);
+                                        }).join(", ");
+                                      } else {
+                                        const texts = fieldValue.map((item: any) => {
+                                          if (typeof item === "string") return item;
+                                          if (typeof item === "object" && item !== null) {
+                                            return item.text || item.name || item.option_name || item.label || JSON.stringify(item);
+                                          }
+                                          return String(item);
+                                        });
+                                        displayValue = texts.join(", ");
+                                      }
+                                    }
+                                  } else if (typeof fieldValue === "object") {
+                                    // 处理对象类型
+                                    if (fieldValue.text) {
+                                      displayValue = fieldValue.text;
+                                    } else if (fieldValue.name) {
+                                      displayValue = fieldValue.name;
+                                    } else {
+                                      displayValue = JSON.stringify(fieldValue);
+                                    }
+                                  } else {
+                                    displayValue = String(fieldValue);
+                                  }
+
+                                  const copyFieldValue = () => {
+                                    copyToClipboard(displayValue, `${fieldName}的值`);
+                                  };
+
+                                  const openFeishuLink = async () => {
+                                    const config = loadFeishuConfig();
+                                    if (config?.appToken && productTableId && productInfo?.record_id) {
+                                      const feishuUrl = `https://bytedance.feishu.cn/base/${config.appToken}?table=${productTableId}&view=default&recordId=${productInfo.record_id}`;
+                                      // 使用 Tauri shell 在默认浏览器中打开链接
+                                      try {
+                                        await openExternalUrl(feishuUrl);
+                                      } catch (error) {
+                                        console.error("打开链接失败:", error);
+                                        // 降级方案：使用 window.open
+                                        window.open(feishuUrl, '_blank');
+                                      }
+                                    }
+                                  };
+
+                                  return (
+                                    <div
+                                      key={fieldName}
+                                      className="group relative bg-gray-50 rounded-lg p-4 border border-gray-200/50 hover:border-blue-300/50 transition-all duration-200"
+                                    >
+                                      <div className="flex items-start justify-between mb-2">
+                                        <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                                          {fieldName}
+                                        </div>
+                                        <div className="flex items-center gap-1">
+                                          {isAttachment && (
+                                            <Button
+                                              variant="ghost"
+                                              size="sm"
+                                              onClick={openFeishuLink}
+                                              className="h-6 px-2 text-xs"
+                                              title="在飞书中查看"
+                                            >
+                                              <ExternalLink className="w-3 h-3 mr-1" />
+                                              查看
+                                            </Button>
+                                          )}
+                                          {displayValue !== "-" && (
+                                            <Button
+                                              variant="ghost"
+                                              size="sm"
+                                              onClick={copyFieldValue}
+                                              className={`h-6 px-2 text-xs ${
+                                                copySuccess === `${fieldName}的值` 
+                                                  ? "text-green-600" 
+                                                  : "text-gray-500 hover:text-blue-600"
+                                              }`}
+                                              title="复制"
+                                            >
+                                              {copySuccess === `${fieldName}的值` ? (
+                                                <CheckCircle2 className="w-3 h-3" />
+                                              ) : (
+                                                <Copy className="w-3 h-3" />
+                                              )}
+                                            </Button>
+                                          )}
+                                        </div>
+                                      </div>
+                                      <div 
+                                        className={`text-sm font-medium text-gray-900 break-words ${
+                                          isAttachment ? "cursor-pointer hover:text-blue-600" : ""
+                                        }`}
+                                        onClick={isAttachment ? openFeishuLink : undefined}
+                                        title={isAttachment ? "点击在飞书中查看" : undefined}
+                                      >
+                                        {displayValue !== "-" ? displayValue : <span className="text-gray-400">未设置</span>}
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              {Object.keys(productInfo.fields).filter(key => key !== "record_id").length === 0 && (
+                                <div className="col-span-2 text-center py-8 text-gray-500 text-sm">
+                                  该产品暂无详细信息
+                                </div>
+                              )}
+                            </div>
+                          )}
                         </>
                       ) : (
-                        <>
-                          <Copy className="w-3 h-3 mr-1" />
-                          复制
-                        </>
+                        <div className="text-center py-8">
+                          <div className="text-sm text-gray-500 mb-2">
+                            {productTableId 
+                              ? "无法加载产品信息，请检查产品ID是否正确" 
+                              : "未找到产品表格配置"}
+                          </div>
+                          {!productTableId && (
+                            <div className="text-xs text-gray-400">
+                              请在设置页面配置 PRODUCTS 表格以显示产品详细信息
+                            </div>
+                          )}
+                        </div>
                       )}
-                    </Button>
-                  </div>
-                  <div className="text-sm text-gray-900 bg-gray-50 p-3 rounded-md whitespace-pre-wrap">
-                    {selectedAnswer.standard_answer}
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <div className="font-medium text-sm text-gray-700 mb-1">状态</div>
-                    <div className="text-sm text-gray-900 bg-gray-50 p-3 rounded-md">
-                      {selectedAnswer.enable_status}
                     </div>
                   </div>
-                  <div>
-                    <div className="font-medium text-sm text-gray-700 mb-1">使用场景</div>
-                    <div className="text-sm text-gray-900 bg-gray-50 p-3 rounded-md">
-                      {selectedAnswer.scene}
+                ) : (
+                  <div className="relative">
+                    <div className="absolute inset-0 bg-gradient-to-r from-gray-500/10 via-gray-500/10 to-gray-500/10 rounded-xl blur-xl"></div>
+                    <div className="relative bg-white rounded-xl p-6 border border-gray-200/50 shadow-lg">
+                      <div className="flex items-center gap-2 mb-4">
+                        <div className="w-1 h-6 bg-gradient-to-b from-gray-600 to-gray-600 rounded-full"></div>
+                        <div className="text-xs font-semibold text-gray-600 uppercase tracking-wider">产品信息</div>
+                      </div>
+                      <div className="text-center py-8 text-gray-500 text-sm">
+                        该问题未关联产品信息
+                      </div>
                     </div>
                   </div>
-                  <div>
-                    <div className="font-medium text-sm text-gray-700 mb-1">语气</div>
-                    <div className="text-sm text-gray-900 bg-gray-50 p-3 rounded-md">
-                      {selectedAnswer.tone}
+                )}
+                {/* AI 功能区域 - 现代化设计 */}
+                <div className="relative mt-8 pt-8 border-t border-gray-200/50">
+                  <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-gray-300 to-transparent"></div>
+                  
+                  <div className="flex items-center justify-between mb-6">
+                    <div className="flex items-center gap-3">
+                      <div className="w-1 h-8 bg-gradient-to-b from-purple-600 to-pink-600 rounded-full"></div>
+                      <div>
+                        <div className="text-lg font-bold text-gray-900">AI 智能助手</div>
+                        <div className="text-xs text-gray-500 mt-0.5">使用 AI 优化、审核和检测知识库内容</div>
+                      </div>
+                    </div>
+                    <div className="text-xs text-amber-600 bg-gradient-to-r from-amber-50 to-orange-50 px-4 py-2 rounded-lg border border-amber-200/50 shadow-sm">
+                      <span className="font-medium">⚠️</span> AI 建议仅供参考，不会直接影响知识库
                     </div>
                   </div>
-                  <div>
-                    <div className="font-medium text-sm text-gray-700 mb-1">对应产品</div>
-                    <div className="text-sm text-gray-900 bg-gray-50 p-3 rounded-md">
-                      {selectedAnswer.product_name}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="font-medium text-sm text-gray-700 mb-1">产品ID</div>
-                    <div className="text-sm text-gray-900 bg-gray-50 p-3 rounded-md font-mono">
-                      {selectedAnswer.product_id}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="font-medium text-sm text-gray-700 mb-1">记录ID</div>
-                    <div className="text-sm text-gray-900 bg-gray-50 p-3 rounded-md font-mono">
-                      {selectedAnswer.record_id}
-                    </div>
-                  </div>
-                </div>
-                {/* AI 功能区域 */}
-                <div className="border-t pt-4 mt-4">
-                  <div className="flex items-center justify-between mb-3">
-                    <div className="font-medium text-sm text-gray-700">AI 功能</div>
-                    <div className="text-xs text-amber-600 bg-amber-50 px-3 py-1 rounded border border-amber-200">
-                      ⚠️ AI 建议仅供参考，不会直接影响知识库
-                    </div>
-                  </div>
-                  <div className="flex flex-wrap gap-2 mb-4">
+                  
+                  <div className="flex flex-wrap gap-3 mb-6">
                     <Button
                       variant="outline"
-                      size="sm"
+                      size="lg"
                       onClick={handleOptimize}
                       disabled={optimizing}
+                      className="flex-1 min-w-[140px] border-2 hover:border-blue-400 hover:bg-blue-50/50 transition-all duration-200"
                     >
                       {optimizing ? (
                         <>
-                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                          优化中...
+                          <Loader2 className="w-5 h-5 mr-2 animate-spin text-blue-600" />
+                          <span className="font-semibold">优化中...</span>
                         </>
                       ) : (
                         <>
-                          <Sparkles className="w-4 h-4 mr-2" />
-                          AI 优化
+                          <Sparkles className="w-5 h-5 mr-2 text-blue-600" />
+                          <span className="font-semibold">AI 优化</span>
                         </>
                       )}
                     </Button>
                     <Button
                       variant="outline"
-                      size="sm"
+                      size="lg"
                       onClick={handleReview}
                       disabled={reviewing}
+                      className="flex-1 min-w-[140px] border-2 hover:border-indigo-400 hover:bg-indigo-50/50 transition-all duration-200"
                     >
                       {reviewing ? (
                         <>
-                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                          审核中...
+                          <Loader2 className="w-5 h-5 mr-2 animate-spin text-indigo-600" />
+                          <span className="font-semibold">审核中...</span>
                         </>
                       ) : (
                         <>
-                          <Shield className="w-4 h-4 mr-2" />
-                          AI 审核
+                          <Shield className="w-5 h-5 mr-2 text-indigo-600" />
+                          <span className="font-semibold">AI 审核</span>
                         </>
                       )}
                     </Button>
                     <Button
                       variant="outline"
-                      size="sm"
+                      size="lg"
                       onClick={handleCheckRisk}
                       disabled={checkingRisk}
+                      className="flex-1 min-w-[140px] border-2 hover:border-red-400 hover:bg-red-50/50 transition-all duration-200"
                     >
                       {checkingRisk ? (
                         <>
-                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                          检测中...
+                          <Loader2 className="w-5 h-5 mr-2 animate-spin text-red-600" />
+                          <span className="font-semibold">检测中...</span>
                         </>
                       ) : (
                         <>
-                          <AlertTriangle className="w-4 h-4 mr-2" />
-                          风险检测
+                          <AlertTriangle className="w-5 h-5 mr-2 text-red-600" />
+                          <span className="font-semibold">风险检测</span>
                         </>
                       )}
                     </Button>
@@ -927,10 +1382,13 @@ export default function AnswerList() {
 
                   {/* AI 优化结果 */}
                   {optimizedResult && (
-                    <Card className="mb-4 border-blue-200 bg-blue-50">
-                      <CardHeader className="pb-3">
+                    <Card className="mb-6 border-2 border-blue-200/50 bg-gradient-to-br from-blue-50/50 to-indigo-50/50 shadow-lg">
+                      <CardHeader className="pb-4">
                         <div className="flex items-center justify-between">
-                          <CardTitle className="text-sm">AI 优化结果</CardTitle>
+                          <div className="flex items-center gap-3">
+                            <div className="w-1 h-8 bg-gradient-to-b from-blue-600 to-indigo-600 rounded-full"></div>
+                            <CardTitle className="text-base font-bold text-gray-900">AI 优化结果</CardTitle>
+                          </div>
                           <div className="flex items-center gap-1">
                             <button
                               onClick={(e) => {
@@ -963,42 +1421,54 @@ export default function AnswerList() {
                           </div>
                         </div>
                       </CardHeader>
-                      <CardContent className="space-y-3">
-                        <div>
-                          <div className="flex items-center justify-between mb-1">
-                            <div className="font-medium text-xs text-gray-700">优化后的客服回复</div>
-                            <Button
-                              variant={copySuccess === "优化后的回复" ? "default" : "outline"}
-                              size="sm"
-                              onClick={() => copyToClipboard(optimizedResult.answerText, "优化后的回复")}
-                              className={`h-6 text-xs transition-all ${
-                                copySuccess === "优化后的回复" 
-                                  ? "bg-green-500 hover:bg-green-600 text-white border-green-500" 
-                                  : ""
-                              }`}
-                            >
-                              {copySuccess === "优化后的回复" ? (
-                                <>
-                                  <CheckCircle2 className="w-3 h-3 mr-1" />
-                                  已复制
-                                </>
-                              ) : (
-                                <>
-                                  <Copy className="w-3 h-3 mr-1" />
-                                  复制
-                                </>
-                              )}
-                            </Button>
-                          </div>
-                          <div className="text-sm text-gray-900 bg-white p-3 rounded-md whitespace-pre-wrap border border-blue-200">
-                            {optimizedResult.answerText}
+                      <CardContent className="space-y-4">
+                        <div className="relative">
+                          <div className="absolute inset-0 bg-gradient-to-r from-blue-500/5 via-indigo-500/5 to-purple-500/5 rounded-xl blur-xl"></div>
+                          <div className="relative bg-white rounded-xl p-5 border-2 border-blue-100/50 shadow-sm">
+                            <div className="flex items-center justify-between mb-3">
+                              <div className="flex items-center gap-2">
+                                <Sparkles className="w-4 h-4 text-blue-600" />
+                                <div className="text-sm font-semibold text-gray-800">优化后的客服回复</div>
+                              </div>
+                              <Button
+                                variant={copySuccess === "优化后的回复" ? "default" : "outline"}
+                                size="sm"
+                                onClick={() => copyToClipboard(optimizedResult.answerText, "优化后的回复")}
+                                className={`h-8 transition-all ${
+                                  copySuccess === "优化后的回复" 
+                                    ? "bg-green-500 hover:bg-green-600 text-white border-green-500 shadow-md" 
+                                    : "border-gray-300 hover:border-blue-400 hover:text-blue-600"
+                                }`}
+                              >
+                                {copySuccess === "优化后的回复" ? (
+                                  <>
+                                    <CheckCircle2 className="w-3.5 h-3.5 mr-1.5" />
+                                    已复制
+                                  </>
+                                ) : (
+                                  <>
+                                    <Copy className="w-3.5 h-3.5 mr-1.5" />
+                                    复制
+                                  </>
+                                )}
+                              </Button>
+                            </div>
+                            <div className="text-base text-gray-800 leading-relaxed whitespace-pre-wrap bg-gray-50/50 rounded-lg p-4 border border-gray-100">
+                              {optimizedResult.answerText}
+                            </div>
                           </div>
                         </div>
                         {optimizedResult.explanationText && (
-                          <div>
-                            <div className="font-medium text-xs text-gray-700 mb-1">内部优化说明</div>
-                            <div className="text-xs text-gray-600 bg-white p-2 rounded-md whitespace-pre-wrap border border-blue-200">
-                              {optimizedResult.explanationText}
+                          <div className="relative">
+                            <div className="absolute inset-0 bg-gradient-to-r from-indigo-500/5 via-purple-500/5 to-pink-500/5 rounded-xl blur-xl"></div>
+                            <div className="relative bg-white/80 rounded-xl p-4 border border-indigo-100/50">
+                              <div className="flex items-center gap-2 mb-2">
+                                <div className="w-1 h-4 bg-gradient-to-b from-indigo-600 to-purple-600 rounded-full"></div>
+                                <div className="text-xs font-semibold text-indigo-700 uppercase tracking-wider">内部优化说明</div>
+                              </div>
+                              <div className="text-sm text-gray-700 leading-relaxed whitespace-pre-wrap">
+                                {optimizedResult.explanationText}
+                              </div>
                             </div>
                           </div>
                         )}
@@ -1036,15 +1506,23 @@ export default function AnswerList() {
 
                   {/* AI 审核结果 */}
                   {reviewResult && (
-                    <Card className={`mb-4 ${
-                      reviewResult.conclusion === "合理" ? "border-green-200 bg-green-50" :
-                      reviewResult.conclusion === "基本合理" ? "border-yellow-200 bg-yellow-50" :
-                      reviewResult.conclusion === "需修改" ? "border-red-200 bg-red-50" :
-                      "border-gray-200 bg-gray-50"
+                    <Card className={`mb-6 border-2 shadow-lg ${
+                      reviewResult.conclusion === "合理" ? "border-green-200/50 bg-gradient-to-br from-green-50/50 to-emerald-50/50" :
+                      reviewResult.conclusion === "基本合理" ? "border-yellow-200/50 bg-gradient-to-br from-yellow-50/50 to-amber-50/50" :
+                      reviewResult.conclusion === "需修改" ? "border-red-200/50 bg-gradient-to-br from-red-50/50 to-rose-50/50" :
+                      "border-gray-200/50 bg-gradient-to-br from-gray-50/50 to-slate-50/50"
                     }`}>
-                      <CardHeader className="pb-3">
+                      <CardHeader className="pb-4">
                         <div className="flex items-center justify-between">
-                          <CardTitle className="text-sm">AI 审核结果</CardTitle>
+                          <div className="flex items-center gap-3">
+                            <div className={`w-1 h-8 rounded-full ${
+                              reviewResult.conclusion === "合理" ? "bg-gradient-to-b from-green-600 to-emerald-600" :
+                              reviewResult.conclusion === "基本合理" ? "bg-gradient-to-b from-yellow-600 to-amber-600" :
+                              reviewResult.conclusion === "需修改" ? "bg-gradient-to-b from-red-600 to-rose-600" :
+                              "bg-gradient-to-b from-gray-600 to-slate-600"
+                            }`}></div>
+                            <CardTitle className="text-base font-bold text-gray-900">AI 审核结果</CardTitle>
+                          </div>
                           <div className="flex items-center gap-1">
                             <button
                               onClick={(e) => {
@@ -1386,9 +1864,11 @@ export default function AnswerList() {
                 )}
               </div>
             )}
+            </div>
           </DialogContent>
         </Dialog>
       </div>
+    </div>
     </div>
   );
 }

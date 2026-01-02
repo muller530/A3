@@ -163,6 +163,71 @@ export async function listAnswers(
   return await invoke("list_answers", { appToken, tableId });
 }
 
+// 答案数据缓存接口
+interface AnswersCache {
+  data: Answer[];
+  tableId: string;
+  timestamp: number; // 同步时间戳
+}
+
+// 保存答案数据到本地缓存
+export function saveAnswersCache(tableId: string, answers: Answer[]): void {
+  try {
+    const cache: AnswersCache = {
+      data: answers,
+      tableId,
+      timestamp: Date.now(),
+    };
+    localStorage.setItem(`ANSWERS_CACHE_${tableId}`, JSON.stringify(cache));
+  } catch (error) {
+    console.error("保存答案缓存失败:", error);
+  }
+}
+
+// 从本地缓存加载答案数据
+export function loadAnswersCache(tableId: string): AnswersCache | null {
+  try {
+    const cacheStr = localStorage.getItem(`ANSWERS_CACHE_${tableId}`);
+    if (!cacheStr) {
+      return null;
+    }
+    const cache: AnswersCache = JSON.parse(cacheStr);
+    // 验证缓存是否匹配当前表格
+    if (cache.tableId !== tableId) {
+      return null;
+    }
+    return cache;
+  } catch (error) {
+    console.error("加载答案缓存失败:", error);
+    return null;
+  }
+}
+
+// 清除答案数据缓存
+export function clearAnswersCache(tableId?: string): void {
+  try {
+    if (tableId) {
+      localStorage.removeItem(`ANSWERS_CACHE_${tableId}`);
+    } else {
+      // 清除所有答案缓存
+      const keys = Object.keys(localStorage);
+      keys.forEach((key) => {
+        if (key.startsWith("ANSWERS_CACHE_")) {
+          localStorage.removeItem(key);
+        }
+      });
+    }
+  } catch (error) {
+    console.error("清除答案缓存失败:", error);
+  }
+}
+
+// 获取缓存数据的同步时间
+export function getCacheTimestamp(tableId: string): number | null {
+  const cache = loadAnswersCache(tableId);
+  return cache ? cache.timestamp : null;
+}
+
 // AI 配置相关接口
 export interface AiConfig {
   api_key: string;
@@ -214,6 +279,19 @@ export async function testAiConnection(): Promise<{ success: boolean; message: s
   }
 }
 
+// 获取表格中的单条记录
+export async function getBitableRecord(
+  appToken: string,
+  tableId: string,
+  recordId: string
+): Promise<AnswerRecord> {
+  return await invoke("get_bitable_record", {
+    appToken,
+    tableId,
+    recordId,
+  });
+}
+
 // 更新答案到飞书
 export async function updateAnswerToFeishu(
   appToken: string,
@@ -258,5 +336,10 @@ export async function checkAnswerRisk(
       reason: error?.toString() || "检测失败",
     };
   }
+}
+
+// 打开外部链接
+export async function openExternalUrl(url: string): Promise<void> {
+  return await invoke("open_external_url", { url });
 }
 

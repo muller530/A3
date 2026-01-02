@@ -792,6 +792,50 @@ pub async fn test_ai_connection() -> Result<String, String> {
 }
 
 #[tauri::command]
+pub async fn get_bitable_record(
+    app_token: String,
+    table_id: String,
+    record_id: String,
+) -> Result<AnswerRecord, String> {
+    let token = get_feishu_access_token().await?;
+    let client = reqwest::Client::new();
+    let url = format!(
+        "{}/bitable/v1/apps/{}/tables/{}/records/{}",
+        FEISHU_API_BASE, app_token, table_id, record_id
+    );
+
+    let response = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await
+        .map_err(|e| format!("网络请求失败: {}", e))?;
+
+    let response_text = response.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+    
+    let result: serde_json::Value = serde_json::from_str(&response_text)
+        .map_err(|e| format!("解析响应失败: {}", e))?;
+
+    if let Some(code) = result.get("code").and_then(|v| v.as_i64()) {
+        if code != 0 {
+            let msg = result.get("msg")
+                .and_then(|v| v.as_str())
+                .unwrap_or("未知错误");
+            return Err(format!("获取记录失败: {}", msg));
+        }
+    }
+
+    let record_data = result.get("data")
+        .and_then(|v| v.get("record"))
+        .ok_or("响应中缺少记录数据")?;
+
+    let record: AnswerRecord = serde_json::from_value(record_data.clone())
+        .map_err(|e| format!("解析记录失败: {}", e))?;
+
+    Ok(record)
+}
+
+#[tauri::command]
 pub async fn update_answer_to_feishu(
     app_token: String,
     table_id: String,
@@ -840,4 +884,12 @@ pub async fn update_answer_to_feishu(
     }
 
     Ok("更新成功".to_string())
+}
+
+#[tauri::command]
+pub async fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_shell::ShellExt;
+    let shell = app.shell();
+    shell.open(url, None).map_err(|e| format!("打开链接失败: {}", e))?;
+    Ok(())
 }
