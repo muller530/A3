@@ -435,6 +435,13 @@ pub async fn list_answers(
                 raw_fields: Some(record.fields), // 保存原始字段数据用于调试
             }
         })
+        // 过滤掉只有问题没有答复的记录
+        .filter(|answer| {
+            let has_question = !answer.question.is_empty() && answer.question != "-";
+            let has_answer = !answer.standard_answer.is_empty() && answer.standard_answer != "-";
+            // 必须同时有问题和答复才同步
+            has_question && has_answer
+        })
         .collect();
 
     Ok(answers)
@@ -884,6 +891,56 @@ pub async fn update_answer_to_feishu(
     }
 
     Ok("更新成功".to_string())
+}
+
+#[tauri::command]
+pub async fn create_answer_to_feishu(
+    app_token: String,
+    table_id: String,
+    fields: HashMap<String, serde_json::Value>,
+) -> Result<String, String> {
+    let token = get_feishu_access_token().await?;
+    let client = reqwest::Client::new();
+    let url = format!(
+        "{}/bitable/v1/apps/{}/tables/{}/records",
+        FEISHU_API_BASE, app_token, table_id
+    );
+
+    // 构建创建请求体
+    let create_body = serde_json::json!({
+        "fields": fields
+    });
+
+    let response = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Content-Type", "application/json")
+        .json(&create_body)
+        .send()
+        .await
+        .map_err(|e| format!("网络请求失败: {}", e))?;
+
+    let status = response.status();
+    let response_text = response.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+
+    if !status.is_success() {
+        return Err(format!("创建失败 ({}): {}", status, response_text));
+    }
+
+    // 解析响应
+    let result: serde_json::Value = serde_json::from_str(&response_text)
+        .map_err(|e| format!("解析响应失败: {}", e))?;
+
+    if let Some(code) = result.get("code").and_then(|v| v.as_i64()) {
+        if code != 0 {
+            let msg = result.get("msg")
+                .and_then(|v| v.as_str())
+                .unwrap_or("未知错误");
+            return Err(format!("创建失败: {}", msg));
+        }
+    }
+
+    Ok("创建成功".to_string())
 }
 
 #[tauri::command]

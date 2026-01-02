@@ -7,7 +7,6 @@ import { Loader2, RefreshCw, CheckCircle2, Database } from "lucide-react";
 export default function TableSettings() {
   const [tables, setTables] = useState<BitableTable[]>([]);
   const [selectedTableId, setSelectedTableId] = useState<string>("");
-  const [loading, setLoading] = useState(false);
   const [loadingTables, setLoadingTables] = useState(false);
   const [message, setMessage] = useState<string>("");
   const [saving, setSaving] = useState(false);
@@ -72,7 +71,7 @@ export default function TableSettings() {
     }
 
     const config = loadFeishuConfig();
-    if (!config || !config.appToken) {
+    if (!config || !config.appToken || !config.appId || !config.appSecret) {
       setMessage("请先在飞书设置中配置飞书凭证和 BITABLE_APP_TOKEN");
       return;
     }
@@ -102,7 +101,9 @@ export default function TableSettings() {
       }
 
       await saveFeishuConfig({
-        ...config,
+        appId: config.appId,
+        appSecret: config.appSecret,
+        appToken: config.appToken,
         tableId: selectedTableId,
         tables: updatedTables,
       });

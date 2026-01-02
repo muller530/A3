@@ -479,3 +479,272 @@ export function getFeishuRecordId(answer: { record_id: string } | null | undefin
   return null;
 }
 
+/**
+ * 中文停用词列表（常见无意义词汇）
+ */
+const STOP_WORDS = new Set([
+  "的", "了", "在", "是", "我", "有", "和", "就", "不", "人", "都", "一", "一个", "上", "也", "很", "到", "说", "要", "去", "你", "会", "着", "没有", "看", "好", "自己", "这",
+  "吗", "什么", "怎么", "如何", "为什么", "哪", "哪个", "哪些", "多少", "几", "多", "少", "能", "可以", "应该", "会", "会", "能", "要", "想", "给", "让", "使",
+  "与", "和", "或", "及", "以及", "还有", "而且", "但是", "不过", "然而", "如果", "假如", "要是", "因为", "所以", "因此", "由于", "为了"
+]);
+
+/**
+ * 同义词映射表（语义相似词）
+ */
+const SYNONYMS: Record<string, string[]> = {
+  "区别": ["差异", "不同", "差别", "区别", "区别是什么", "有什么区别", "有什么不同", "有什么差异"],
+  "差异": ["区别", "不同", "差别", "差异", "区别是什么", "有什么区别", "有什么不同", "有什么差异"],
+  "不同": ["区别", "差异", "差别", "不同", "区别是什么", "有什么区别", "有什么不同", "有什么差异"],
+  "差别": ["区别", "差异", "不同", "差别", "区别是什么", "有什么区别", "有什么不同", "有什么差异"],
+  "怎么": ["如何", "怎样", "怎么", "怎么用", "如何使用", "怎样使用"],
+  "如何": ["怎么", "怎样", "如何", "怎么用", "如何使用", "怎样使用"],
+  "怎样": ["怎么", "如何", "怎样", "怎么用", "如何使用", "怎样使用"],
+  "功效": ["作用", "效果", "功能", "功效", "有什么作用", "有什么效果", "有什么功能"],
+  "作用": ["功效", "效果", "功能", "作用", "有什么作用", "有什么效果", "有什么功能"],
+  "效果": ["功效", "作用", "功能", "效果", "有什么作用", "有什么效果", "有什么功能"],
+  "功能": ["功效", "作用", "效果", "功能", "有什么作用", "有什么效果", "有什么功能"],
+  "可以": ["能", "能够", "能否", "可以", "能不能", "能否"],
+  "能": ["可以", "能够", "能否", "能", "能不能", "能否"],
+  "配": ["搭配", "配合", "一起", "配", "和", "与"],
+  "搭配": ["配", "配合", "一起", "搭配", "和", "与"],
+  "一起": ["配", "搭配", "配合", "一起", "和", "与"],
+  "普通": ["一般", "常规", "普通", "常见", "通常"],
+  "一般": ["普通", "常规", "一般", "常见", "通常"],
+  "天然": ["自然", "天然", "有机", "纯天然"],
+  "自然": ["天然", "自然", "有机", "纯天然"],
+};
+
+/**
+ * 提取关键词（去除停用词和标点）
+ */
+function extractKeywords(text: string): string[] {
+  if (!text) return [];
+  
+  // 移除标点符号，保留中英文和数字
+  const cleaned = text.replace(/[，。！？、；：""''（）【】《》\s,\.!?;:\(\)\[\]<>]/g, " ");
+  
+  // 分割成词（中文字符单独成词，英文单词按空格分割）
+  const words: string[] = [];
+  let currentWord = "";
+  
+  for (let i = 0; i < cleaned.length; i++) {
+    const char = cleaned[i];
+    const isChinese = /[\u4e00-\u9fa5]/.test(char);
+    const isEnglish = /[a-zA-Z0-9]/.test(char);
+    
+    if (isChinese) {
+      if (currentWord) {
+        words.push(currentWord.toLowerCase());
+        currentWord = "";
+      }
+      words.push(char);
+    } else if (isEnglish) {
+      currentWord += char;
+    } else {
+      if (currentWord) {
+        words.push(currentWord.toLowerCase());
+        currentWord = "";
+      }
+    }
+  }
+  
+  if (currentWord) {
+    words.push(currentWord.toLowerCase());
+  }
+  
+  // 过滤停用词和空词
+  return words.filter(word => word.length > 0 && !STOP_WORDS.has(word));
+}
+
+/**
+ * 获取同义词组（包括自身）
+ */
+function getSynonymGroup(word: string): string[] {
+  const lowerWord = word.toLowerCase();
+  const synonyms: string[] = [lowerWord];
+  
+  // 查找同义词
+  for (const [key, values] of Object.entries(SYNONYMS)) {
+    if (key === lowerWord || values.includes(lowerWord)) {
+      synonyms.push(...values);
+      synonyms.push(key);
+    }
+  }
+  
+  return [...new Set(synonyms)];
+}
+
+/**
+ * 计算关键词匹配度（基于语义理解）
+ */
+function calculateKeywordMatch(searchKeywords: string[], targetKeywords: string[]): number {
+  if (searchKeywords.length === 0 || targetKeywords.length === 0) {
+    return 0;
+  }
+  
+  let matchedCount = 0;
+  let totalScore = 0;
+  const matchedKeywords = new Set<string>();
+  
+  // 对每个搜索关键词，检查是否在目标文本中匹配（包括同义词）
+  for (const searchWord of searchKeywords) {
+    const synonymGroup = getSynonymGroup(searchWord);
+    let bestMatch = 0;
+    let matchedWord = "";
+    
+    for (const targetWord of targetKeywords) {
+      let matchScore = 0;
+      
+      // 完全匹配（最高分）
+      if (searchWord === targetWord.toLowerCase()) {
+        matchScore = 100;
+      }
+      // 同义词组匹配（高分）
+      else if (synonymGroup.includes(targetWord.toLowerCase())) {
+        matchScore = 90;
+      }
+      // 同义词匹配（中高分）
+      else {
+        const targetSynonymGroup = getSynonymGroup(targetWord);
+        if (synonymGroup.some(syn => targetSynonymGroup.includes(syn))) {
+          matchScore = 85;
+        }
+        // 包含匹配（中分，仅对较长词）
+        else if (searchWord.length >= 2 && targetWord.length >= 2) {
+          if (targetWord.includes(searchWord) || searchWord.includes(targetWord)) {
+            matchScore = 60;
+          }
+        }
+      }
+      
+      if (matchScore > bestMatch) {
+        bestMatch = matchScore;
+        matchedWord = targetWord;
+      }
+    }
+    
+    if (bestMatch > 0) {
+      matchedCount++;
+      totalScore += bestMatch;
+      if (matchedWord) {
+        matchedKeywords.add(matchedWord);
+      }
+    }
+  }
+  
+  // 基础匹配度：匹配的关键词数 / 搜索关键词总数
+  const keywordMatchRatio = matchedCount / searchKeywords.length;
+  
+  // 平均匹配质量
+  const avgMatchQuality = matchedCount > 0 ? totalScore / matchedCount : 0;
+  
+  // 覆盖率：匹配的关键词数 / 目标关键词总数（额外加分）
+  const coverageRatio = Math.min(matchedKeywords.size / targetKeywords.length, 1);
+  
+  // 综合得分：基础匹配度 * 平均质量 + 覆盖率加分
+  const finalScore = keywordMatchRatio * avgMatchQuality * 0.8 + coverageRatio * 20;
+  
+  return Math.min(Math.round(finalScore * 100) / 100, 100);
+}
+
+/**
+ * 计算两个字符串的语义相似度
+ * 基于关键词提取和语义匹配
+ * 
+ * @param str1 第一个字符串
+ * @param str2 第二个字符串
+ * @returns 相似度百分比 (0-100)
+ */
+export function calculateSimilarity(str1: string, str2: string): number {
+  if (!str1 || !str2) {
+    return 0;
+  }
+
+  const s1 = str1.toLowerCase().trim();
+  const s2 = str2.toLowerCase().trim();
+
+  if (s1 === s2) {
+    return 100;
+  }
+
+  // 提取关键词
+  const keywords1 = extractKeywords(s1);
+  const keywords2 = extractKeywords(s2);
+  
+  if (keywords1.length === 0 || keywords2.length === 0) {
+    // 如果无法提取关键词，回退到简单的包含匹配
+    if (s1.includes(s2) || s2.includes(s1)) {
+      return 50;
+    }
+    return 0;
+  }
+  
+  // 计算关键词匹配度
+  const keywordMatch = calculateKeywordMatch(keywords1, keywords2);
+  
+  // 计算反向匹配度（取平均值）
+  const reverseMatch = calculateKeywordMatch(keywords2, keywords1);
+  
+  // 综合匹配度
+  const semanticScore = (keywordMatch + reverseMatch) / 2;
+  
+  // 如果完全匹配，返回100
+  if (semanticScore >= 95) {
+    return 100;
+  }
+  
+  // 如果包含关系，给予额外加分
+  if (s1.includes(s2) || s2.includes(s1)) {
+    return Math.max(semanticScore, 60);
+  }
+  
+  return Math.round(semanticScore * 100) / 100;
+}
+
+/**
+ * 计算问题与答案的匹配度（基于语义理解）
+ * 考虑问题文本和答案文本的语义相似度
+ * 
+ * @param question 搜索的问题
+ * @param answer 答案对象
+ * @returns 匹配度百分比 (0-100)
+ */
+export function calculateAnswerMatchScore(
+  question: string,
+  answer: { question: string; standard_answer: string }
+): number {
+  if (!question || !answer) {
+    return 0;
+  }
+
+  const searchTerm = question.trim();
+  const answerQuestion = answer.question?.trim() || "";
+  const answerText = answer.standard_answer?.trim() || "";
+
+  // 提取搜索关键词
+  const searchKeywords = extractKeywords(searchTerm);
+  
+  // 计算问题相似度（权重 80%）
+  const questionKeywords = extractKeywords(answerQuestion);
+  const questionMatch = calculateKeywordMatch(searchKeywords, questionKeywords);
+  
+  // 计算答案文本相似度（权重 20%）
+  const answerKeywords = extractKeywords(answerText);
+  const answerMatch = calculateKeywordMatch(searchKeywords, answerKeywords);
+
+  // 加权平均
+  const matchScore = questionMatch * 0.8 + answerMatch * 0.2;
+  
+  // 如果问题完全匹配，给予高分
+  if (questionMatch >= 90) {
+    return Math.min(matchScore + 10, 100);
+  }
+  
+  // 如果问题高度匹配，给予加分
+  if (questionMatch >= 70) {
+    return Math.min(matchScore + 5, 100);
+  }
+
+  return Math.round(matchScore * 100) / 100;
+}
+

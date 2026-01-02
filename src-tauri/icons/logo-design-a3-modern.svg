@@ -1,0 +1,130 @@
+<!-- 基于原 A3 图标的现代设计 -->
+<!-- 特点：统一背景、光影效果、圆角、渐变 -->
+<svg width="2048" height="2048" viewBox="0 0 2048 2048" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- 背景渐变 -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1E293B;stop-opacity:1" />
+      <stop offset="50%" style="stop-color:#0F172A;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#1E293B;stop-opacity:1" />
+    </linearGradient>
+    
+    <!-- 图标背景渐变（深色到浅色，营造立体感） -->
+    <linearGradient id="iconBgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1F2937;stop-opacity:1" />
+      <stop offset="50%" style="stop-color:#111827;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#030712;stop-opacity:1" />
+    </linearGradient>
+    
+    <!-- 图标高光渐变（顶部亮，底部暗） -->
+    <linearGradient id="iconHighlight" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#FFFFFF;stop-opacity:0.15" />
+      <stop offset="30%" style="stop-color:#FFFFFF;stop-opacity:0.08" />
+      <stop offset="100%" style="stop-color:#000000;stop-opacity:0.3" />
+    </linearGradient>
+    
+    <!-- 文字渐变（白色到浅灰，增加层次） -->
+    <linearGradient id="textGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#FFFFFF;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#E5E7EB;stop-opacity:1" />
+    </linearGradient>
+    
+    <!-- 阴影滤镜 -->
+    <filter id="shadow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="40"/>
+      <feOffset dx="0" dy="20" result="offsetblur"/>
+      <feComponentTransfer>
+        <feFuncA type="linear" slope="0.3"/>
+      </feComponentTransfer>
+      <feMerge>
+        <feMergeNode/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    
+    <!-- 内阴影（营造凹陷感） -->
+    <filter id="innerShadow">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="30"/>
+      <feOffset dx="0" dy="15"/>
+      <feComponentTransfer>
+        <feFuncA type="linear" slope="0.4"/>
+      </feComponentTransfer>
+      <feComposite in="SourceGraphic" operator="arithmetic" k2="-1" k3="1"/>
+    </filter>
+    
+    <!-- 光泽效果 -->
+    <linearGradient id="shine" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#FFFFFF;stop-opacity:0.4" />
+      <stop offset="50%" style="stop-color:#FFFFFF;stop-opacity:0.1" />
+      <stop offset="100%" style="stop-color:#FFFFFF;stop-opacity:0" />
+    </linearGradient>
+  </defs>
+  
+  <!-- 统一背景 -->
+  <rect width="2048" height="2048" rx="0" fill="url(#bgGrad)"/>
+  
+  <!-- 图标圆角方形（居中，留出边距） -->
+  <!-- 位置：居中，尺寸约为 1400x1400，留出 15% 边距 -->
+  <rect x="324" y="324" width="1400" height="1400" rx="280" ry="280" 
+        fill="url(#iconBgGrad)" 
+        filter="url(#shadow)"/>
+  
+  <!-- 图标内阴影（底部） -->
+  <rect x="324" y="324" width="1400" height="1400" rx="280" ry="280" 
+        fill="url(#iconHighlight)"/>
+  
+  <!-- 图标高光（顶部） -->
+  <ellipse cx="1024" cy="600" rx="500" ry="200" 
+           fill="url(#shine)" 
+           opacity="0.6"/>
+  
+  <!-- 图标边框（微妙的光影效果） -->
+  <rect x="324" y="324" width="1400" height="1400" rx="280" ry="280" 
+        fill="none" 
+        stroke="rgba(255,255,255,0.1)" 
+        stroke-width="2"/>
+  
+  <!-- A3 文字 -->
+  <!-- 字母 A -->
+  <g transform="translate(1024, 1024)">
+    <!-- A 字母阴影 -->
+    <path d="M -280 200 L -80 -400 L 80 -400 L 280 200 L 130 200 L 30 -100 L -30 -100 L -130 200 Z" 
+          fill="#000000" opacity="0.3" transform="translate(5, 5)"/>
+    
+    <!-- A 字母主体 -->
+    <path d="M -280 200 L -80 -400 L 80 -400 L 280 200 L 130 200 L 30 -100 L -30 -100 L -130 200 Z" 
+          fill="url(#textGrad)" 
+          stroke="rgba(255,255,255,0.2)" 
+          stroke-width="4"/>
+    
+    <!-- A 字母横线 -->
+    <line x1="-100" y1="-50" x2="100" y2="-50" 
+          stroke="url(#textGrad)" 
+          stroke-width="50" 
+          stroke-linecap="round"/>
+    
+    <!-- 数字 3 阴影 -->
+    <path d="M 400 -400 Q 400 -450 450 -450 Q 500 -450 500 -400 Q 500 -350 450 -350 Q 500 -350 500 -300 Q 500 -250 450 -250 Q 400 -250 400 -200 L 400 -100 Q 400 -50 450 -50 Q 500 -50 500 0 Q 500 50 450 50 Q 400 50 400 100 L 400 200" 
+          fill="none" 
+          stroke="#000000" 
+          stroke-width="80" 
+          stroke-linecap="round" 
+          stroke-linejoin="round" 
+          opacity="0.3" 
+          transform="translate(5, 5)"/>
+    
+    <!-- 数字 3 主体 -->
+    <path d="M 400 -400 Q 400 -450 450 -450 Q 500 -450 500 -400 Q 500 -350 450 -350 Q 500 -350 500 -300 Q 500 -250 450 -250 Q 400 -250 400 -200 L 400 -100 Q 400 -50 450 -50 Q 500 -50 500 0 Q 500 50 450 50 Q 400 50 400 100 L 400 200" 
+          fill="none" 
+          stroke="url(#textGrad)" 
+          stroke-width="80" 
+          stroke-linecap="round" 
+          stroke-linejoin="round"/>
+  </g>
+  
+  <!-- 底部反射光（营造立体感） -->
+  <ellipse cx="1024" cy="1600" rx="600" ry="150" 
+           fill="rgba(255,255,255,0.05)" 
+           opacity="0.5"/>
+</svg>
+

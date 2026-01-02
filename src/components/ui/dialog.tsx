@@ -61,7 +61,7 @@ const DialogContent = React.forwardRef<HTMLDivElement, DialogContentProps>(
 
     return (
       <div
-        className="fixed inset-0 z-50 flex items-center justify-center"
+        className="fixed inset-0 z-50 flex items-center justify-center p-4"
         onClick={() => {
           onOpenChange(false)
           onClose?.()
@@ -71,7 +71,7 @@ const DialogContent = React.forwardRef<HTMLDivElement, DialogContentProps>(
         <div
           ref={ref}
           className={cn(
-            "relative z-50 w-full max-w-4xl rounded-2xl border border-white/40 bg-white/95 backdrop-blur-xl p-0 shadow-2xl overflow-hidden",
+            "relative z-50 w-full max-w-4xl rounded-2xl border border-white/40 bg-white/95 backdrop-blur-xl shadow-2xl flex flex-col max-h-[90vh]",
             className
           )}
           onClick={(e) => e.stopPropagation()}

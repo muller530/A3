@@ -189,7 +189,7 @@ export default function HomePage() {
           {searchHistory.length > 0 && (
             <div className="mt-8 animate-in fade-in slide-in-from-bottom-12 duration-1000 delay-500">
               <div className="flex flex-wrap justify-center gap-2">
-                {searchHistory.slice(0, 8).map((item, index) => (
+                {searchHistory.slice(0, 10).map((item, index) => (
                   <button
                     key={item.term}
                     onClick={() => handleHistoryClick(item.term)}

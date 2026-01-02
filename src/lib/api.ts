@@ -42,8 +42,8 @@ export async function setFeishuCredentials(
 export async function saveFeishuConfig(config: FeishuConfig): Promise<void> {
   // Phase 1: 使用 localStorage（临时方案）
   // Phase 2: 将替换为 Tauri secure storage 以确保安全性
-  localStorage.setItem("FEISHU_APP_ID", config.appId);
-  localStorage.setItem("FEISHU_APP_SECRET", config.appSecret);
+  localStorage.setItem("FEISHU_APP_ID", config.appId || "");
+  localStorage.setItem("FEISHU_APP_SECRET", config.appSecret || "");
   localStorage.setItem("BITABLE_APP_TOKEN", config.appToken);
   localStorage.setItem("ANSWERS_TABLE_ID", config.tableId);
   
@@ -59,8 +59,16 @@ export async function saveFeishuConfig(config: FeishuConfig): Promise<void> {
     }
   }
   
-  // 同时保存到后端（用于后端 API 调用）
-  await setFeishuCredentials(config.appId, config.appSecret);
+  // 只有在有完整配置时才保存到后端（用于后端 API 调用）
+  // 本地模式下不需要后端凭证
+  if (config.appId && config.appSecret) {
+    try {
+      await setFeishuCredentials(config.appId, config.appSecret);
+    } catch (error) {
+      console.warn("保存后端凭证失败（本地模式下可忽略）:", error);
+      // 本地模式下忽略后端错误，不影响配置保存
+    }
+  }
 }
 
 // 从本地加载飞书配置
@@ -73,7 +81,12 @@ export function loadFeishuConfig(): Partial<FeishuConfig> | null {
   const appToken = localStorage.getItem("BITABLE_APP_TOKEN");
   const tableId = localStorage.getItem("ANSWERS_TABLE_ID");
 
-  if (!appId || !appSecret) {
+  // 支持本地模式：即使没有 appId 和 appSecret，只要有 appToken 和 tableId 也可以使用
+  // 这种情况下只能使用缓存数据，无法同步
+  const hasFullConfig = appId && appSecret;
+  const hasLocalConfig = appToken && tableId;
+
+  if (!hasFullConfig && !hasLocalConfig) {
     return null;
   }
 
@@ -90,12 +103,12 @@ export function loadFeishuConfig(): Partial<FeishuConfig> | null {
 
   // 如果没有表格配置但有 appToken 和 tableId，创建默认配置（兼容旧版本）
   if (tables.length === 0 && appToken && tableId) {
-    tables = [{ name: "Answers", appToken, tableId }];
+    tables = [{ name: "answers", appToken, tableId }];
   }
 
   return {
-    appId,
-    appSecret,
+    appId: appId || "",
+    appSecret: appSecret || "",
     appToken: appToken || "",
     tableId: tableId || "",
     tables,
@@ -336,6 +349,66 @@ export async function checkAnswerRisk(
       reason: error?.toString() || "检测失败",
     };
   }
+}
+
+// 创建新记录到飞书
+export async function createAnswerToFeishu(
+  appToken: string,
+  tableId: string,
+  fields: Record<string, any>
+): Promise<string> {
+  return await invoke("create_answer_to_feishu", {
+    appToken,
+    tableId,
+    fields,
+  });
+}
+
+// 获取用户最后同步时间（用于限制普通用户一天只能同步一次）
+export function getLastSyncTimeForUser(userId: string): number | null {
+  try {
+    const key = `LAST_SYNC_TIME_${userId}`;
+    const timeStr = localStorage.getItem(key);
+    return timeStr ? parseInt(timeStr, 10) : null;
+  } catch (error) {
+    console.error("获取最后同步时间失败:", error);
+    return null;
+  }
+}
+
+// 保存用户最后同步时间
+export function saveLastSyncTimeForUser(userId: string, timestamp: number): void {
+  try {
+    const key = `LAST_SYNC_TIME_${userId}`;
+    localStorage.setItem(key, timestamp.toString());
+  } catch (error) {
+    console.error("保存最后同步时间失败:", error);
+  }
+}
+
+// 检查用户今天是否已经同步过（普通用户一天只能同步一次）
+export function canSyncToday(userId: string, role: string | null): boolean {
+  // 管理员不受限制
+  if (role === "admin") {
+    return true;
+  }
+
+  // 普通用户检查是否今天已经同步过
+  const lastSyncTime = getLastSyncTimeForUser(userId);
+  if (!lastSyncTime) {
+    return true; // 从未同步过，可以同步
+  }
+
+  const now = Date.now();
+  const lastSyncDate = new Date(lastSyncTime);
+  const today = new Date(now);
+
+  // 检查是否是同一天
+  return (
+    lastSyncDate.getFullYear() !== today.getFullYear() ||
+    lastSyncDate.getMonth() !== today.getMonth() ||
+    lastSyncDate.getDate() !== today.getDate()
+  );
 }
 
 // 打开外部链接

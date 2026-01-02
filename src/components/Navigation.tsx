@@ -1,21 +1,32 @@
 import { Link, useLocation } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 import { Button } from "./ui/button";
-import { Home, Settings, FileText, LogOut } from "lucide-react";
+import { Home, Settings, FileText, LogOut, HelpCircle } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useEffect, useRef, useState } from "react";
 
 export default function Navigation() {
-  const { role, logout } = useAuth();
+  const { role, currentUser, logout } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
   const [indicatorStyle, setIndicatorStyle] = useState({ width: 0, left: 0 });
   const navRef = useRef<HTMLDivElement>(null);
-  const buttonRefs = [useRef<HTMLAnchorElement>(null), useRef<HTMLAnchorElement>(null), useRef<HTMLAnchorElement>(null)];
+  const buttonRefs = [
+    useRef<HTMLAnchorElement>(null), 
+    useRef<HTMLAnchorElement>(null), 
+    useRef<HTMLAnchorElement>(null),
+    useRef<HTMLAnchorElement>(null)
+  ];
+
+  const isGuest = !currentUser || currentUser.id === "default";
 
   const handleLogout = () => {
     logout();
-    navigate("/login");
+    // 退出登录后保持在当前页面，不跳转
+  };
+
+  const handleLogin = () => {
+    navigate("/login?redirect=" + encodeURIComponent(location.pathname));
   };
 
   const isActive = (path: string) => {
@@ -27,7 +38,17 @@ export default function Navigation() {
     const updateIndicator = () => {
       if (!navRef.current) return;
       
-      const activeIndex = isActive("/") ? 0 : isActive("/answers") ? 1 : isActive("/settings") ? 2 : 0;
+      // 登录页面不显示指示器
+      if (isActive("/login")) {
+        setIndicatorStyle({ width: 0, left: 0 });
+        return;
+      }
+      
+      const activeIndex = isActive("/") ? 0 : isActive("/answers") ? 1 : isActive("/settings") ? 2 : isActive("/help") ? 3 : -1;
+      if (activeIndex === -1) {
+        setIndicatorStyle({ width: 0, left: 0 });
+        return;
+      }
       const activeButton = buttonRefs[activeIndex]?.current;
       
       if (activeButton && navRef.current) {
@@ -114,7 +135,11 @@ export default function Navigation() {
                   <span className={`transition-all duration-300 ${isActive("/answers") ? "font-semibold" : "font-medium"}`}>知识库</span>
                 </Button>
               </Link>
-              <Link ref={buttonRefs[2]} to="/settings" className="relative z-10">
+              <Link 
+                ref={buttonRefs[2]} 
+                to={isGuest ? "/login?redirect=/settings" : "/settings"} 
+                className="relative z-10"
+              >
                 <Button
                   variant="ghost"
                   size="sm"
@@ -128,19 +153,67 @@ export default function Navigation() {
                   <span className={`transition-all duration-300 ${isActive("/settings") ? "font-semibold" : "font-medium"}`}>设置</span>
                 </Button>
               </Link>
+              <Link ref={buttonRefs[3]} to="/help" className="relative z-10">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className={`flex items-center gap-2 transition-all duration-300 relative px-4 ${
+                    isActive("/help") 
+                      ? "text-white" 
+                      : "text-gray-600 hover:text-gray-900"
+                  }`}
+                >
+                  <HelpCircle className={`w-4 h-4 transition-all duration-300 ${isActive("/help") ? "text-white" : "text-gray-500"}`} />
+                  <span className={`transition-all duration-300 ${isActive("/help") ? "font-semibold" : "font-medium"}`}>使用说明</span>
+                </Button>
+              </Link>
             </div>
             <span className="text-sm font-medium text-gray-700 bg-white/60 px-3 py-1.5 rounded-lg backdrop-blur-sm">
-              角色: <span className="text-blue-600 font-semibold">{role}</span>
+              {isGuest ? (
+                <>访客用户</>
+              ) : (
+                <>
+                  用户: <span className="text-blue-600 font-semibold">{currentUser?.username}</span> | 
+                  角色: <span className="text-blue-600 font-semibold">{role === "admin" ? "管理员" : "普通用户"}</span>
+                </>
+              )}
             </span>
-            <Button 
-              variant="outline" 
-              onClick={handleLogout} 
-              size="sm"
-              className="bg-white/60 backdrop-blur-sm hover:bg-white/80 border-white/40 transition-all duration-200"
-            >
-              <LogOut className="w-4 h-4 mr-2" />
-              退出登录
-            </Button>
+            {isActive("/login") ? (
+              // 在登录页面，如果已登录则显示退出登录，否则不显示按钮
+              !isGuest ? (
+                <Button 
+                  variant="outline" 
+                  onClick={handleLogout} 
+                  size="sm"
+                  className="bg-white/60 backdrop-blur-sm hover:bg-white/80 border-white/40 transition-all duration-200"
+                >
+                  <LogOut className="w-4 h-4 mr-2" />
+                  退出登录
+                </Button>
+              ) : null
+            ) : (
+              // 在其他页面
+              isGuest ? (
+                <Button 
+                  variant="outline" 
+                  onClick={handleLogin} 
+                  size="sm"
+                  className="bg-white/60 backdrop-blur-sm hover:bg-white/80 border-white/40 transition-all duration-200"
+                >
+                  登录
+                </Button>
+              ) : (
+                <Button 
+                  variant="outline" 
+                  onClick={handleLogout} 
+                  size="sm"
+                  className="bg-white/60 backdrop-blur-sm hover:bg-white/80 border-white/40 transition-all duration-200"
+                >
+                  <LogOut className="w-4 h-4 mr-2" />
+                  退出登录
+                </Button>
+              )
+            )}
           </div>
         </div>
       </div>

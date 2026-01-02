@@ -42,8 +42,8 @@ const TabsList = React.forwardRef<HTMLDivElement, TabsListProps>(
   ({ className, children, ...props }, ref) => {
     const context = React.useContext(TabsContext);
     const childrenArray = React.Children.toArray(children);
-    const activeIndex = context ? childrenArray.findIndex((child: any) => 
-      React.isValidElement(child) && child.props.value === context.value
+    const activeIndex = context ? childrenArray.findIndex((child) => 
+      React.isValidElement(child) && (child.props as { value?: string }).value === context.value
     ) : -1;
     const totalTabs = childrenArray.length;
     

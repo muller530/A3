@@ -177,12 +177,70 @@ export default function FeishuSettings() {
   };
 
   const handleSave = async () => {
-    if (!appId || !appSecret) {
-      setMessage("请填写完整的飞书凭证信息");
+    // 检查是否为本地模式（只有 appToken 和 tableId，没有 appId 和 appSecret）
+    const isLocalMode = !appId || !appSecret;
+
+    if (isLocalMode) {
+      // 本地模式：只需要 appToken 和至少一个 tableId
+      if (!appToken) {
+        setMessage("请配置 BITABLE_APP_TOKEN（应用级别，所有表格共享）");
+        setTestResult(null);
+        return;
+      }
+
+      const missingTables: string[] = [];
+      REQUIRED_TABLES.forEach((table) => {
+        const state = tableLinks[table.key];
+        // products 表格是可选的，其他表格是必填的
+        if (table.key !== "products" && !state?.tableId) {
+          missingTables.push(table.label);
+        }
+      });
+
+      if (missingTables.length > 0) {
+        setMessage(`请配置以下表格：${missingTables.join("、")}`);
+        setTestResult(null);
+        return;
+      }
+
+      setLoading(true);
+      setMessage("");
       setTestResult(null);
+
+      try {
+        const tables: TableConfig[] = REQUIRED_TABLES.map((table) => {
+          const state = tableLinks[table.key];
+          // 只保存已配置的表格
+          if (state?.tableId) {
+            return {
+              name: table.key,
+              appToken: appToken,
+              tableId: state.tableId,
+            };
+          }
+          return null;
+        }).filter((table): table is TableConfig => table !== null);
+
+        const firstTable = tables[0];
+
+        await saveFeishuConfig({
+          appId: "", // 本地模式下为空
+          appSecret: "", // 本地模式下为空
+          appToken: appToken,
+          tableId: firstTable.tableId,
+          tables,
+        });
+        
+        setMessage("配置保存成功！注意：当前为本地模式，只能使用缓存数据，无法同步最新数据。如需同步功能，请配置完整的飞书凭证（App ID 和 App Secret）");
+      } catch (error: any) {
+        setMessage(`保存失败: ${error.message || error}`);
+      } finally {
+        setLoading(false);
+      }
       return;
     }
 
+    // 完整模式：需要所有配置
     if (!appToken) {
       setMessage("请配置 BITABLE_APP_TOKEN（应用级别，所有表格共享）");
       setTestResult(null);
@@ -253,33 +311,47 @@ export default function FeishuSettings() {
           <span className="text-xs text-amber-600 mt-1 block">
             注意：当前使用 localStorage 存储配置，Phase 2 将迁移至 Tauri secure storage
           </span>
+          <br />
+          <span className="text-xs text-blue-600 mt-1 block">
+            提示：如果无法配置 App ID 和 App Secret，可以仅配置 App Token 和 Table ID 使用本地模式（只能查看缓存数据，无法同步最新数据）
+          </span>
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
         {/* FEISHU_APP_ID */}
         <div>
           <label className="text-sm font-medium mb-2 block">
-            FEISHU_APP_ID <span className="text-red-500">*</span>
+            FEISHU_APP_ID <span className="text-gray-500 text-xs font-normal">(可选，用于同步功能)</span>
           </label>
           <Input
             type="text"
-            placeholder="请输入飞书应用 App ID"
+            placeholder="请输入飞书应用 App ID（留空则使用本地模式）"
             value={appId}
             onChange={(e) => setAppId(e.target.value)}
           />
+          {!appId && (
+            <p className="text-xs text-blue-600 mt-1">
+              本地模式：不填写 App ID 和 App Secret 时，只能使用缓存数据，无法同步最新数据
+            </p>
+          )}
         </div>
 
         {/* FEISHU_APP_SECRET */}
         <div>
           <label className="text-sm font-medium mb-2 block">
-            FEISHU_APP_SECRET <span className="text-red-500">*</span>
+            FEISHU_APP_SECRET <span className="text-gray-500 text-xs font-normal">(可选，用于同步功能)</span>
           </label>
           <Input
             type="password"
-            placeholder="请输入飞书应用 App Secret"
+            placeholder="请输入飞书应用 App Secret（留空则使用本地模式）"
             value={appSecret}
             onChange={(e) => setAppSecret(e.target.value)}
           />
+          {!appSecret && (
+            <p className="text-xs text-blue-600 mt-1">
+              本地模式：不填写 App ID 和 App Secret 时，只能使用缓存数据，无法同步最新数据
+            </p>
+          )}
         </div>
 
         {/* BITABLE_APP_TOKEN（应用级别，所有表格共享） */}

@@ -1,3 +1,5 @@
+import { useState, useEffect } from "react";
+import { useSearchParams } from "react-router-dom";
 import Navigation from "../components/Navigation";
 import AccountSettings from "../components/settings/AccountSettings";
 import FeishuSettings from "../components/settings/FeishuSettings";
@@ -7,6 +9,23 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs"
 import { User, Cloud, Sparkles, Database } from "lucide-react";
 
 export default function SettingsPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tabParam = searchParams.get("tab");
+  const validTabs = ["account", "feishu", "table", "ai"];
+  const defaultTab = validTabs.includes(tabParam || "") ? tabParam! : "account";
+  const [activeTab, setActiveTab] = useState(defaultTab);
+
+  useEffect(() => {
+    if (tabParam && validTabs.includes(tabParam)) {
+      setActiveTab(tabParam);
+    }
+  }, [tabParam]);
+
+  const handleTabChange = (value: string) => {
+    setActiveTab(value);
+    setSearchParams({ tab: value });
+  };
+
   return (
     <div className="min-h-screen relative">
       {/* 背景装饰 */}
@@ -20,7 +39,7 @@ export default function SettingsPage() {
             <p className="text-gray-600 font-medium">管理您的账号、飞书和 AI 配置</p>
           </div>
 
-          <Tabs defaultValue="account" className="w-full">
+          <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full">
             <TabsList className="grid w-full grid-cols-4">
               <TabsTrigger value="account" className="flex items-center gap-2">
                 <User className="w-4 h-4" />

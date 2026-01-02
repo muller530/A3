@@ -1,0 +1,39 @@
+<!-- 设计方案 2: 科技风格 - 数据库 + 连接 -->
+<!-- 主题：数据节点网络（代表知识库和连接） -->
+<svg width="2048" height="2048" viewBox="0 0 2048 2048" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0EA5E9;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#3B82F6;stop-opacity:1" />
+    </linearGradient>
+    <radialGradient id="nodeGrad">
+      <stop offset="0%" style="stop-color:#FFFFFF;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#DBEAFE;stop-opacity:1" />
+    </radialGradient>
+  </defs>
+  
+  <!-- 背景 -->
+  <rect width="2048" height="2048" rx="0" fill="url(#bg2)"/>
+  
+  <!-- 中心节点 -->
+  <circle cx="1024" cy="1024" r="280" fill="url(#nodeGrad)" stroke="#1E40AF" stroke-width="12"/>
+  <circle cx="1024" cy="1024" r="200" fill="none" stroke="#3B82F6" stroke-width="8" stroke-dasharray="20,10"/>
+  
+  <!-- 周围节点 -->
+  <circle cx="600" cy="600" r="180" fill="url(#nodeGrad)" stroke="#1E40AF" stroke-width="10"/>
+  <circle cx="1448" cy="600" r="180" fill="url(#nodeGrad)" stroke="#1E40AF" stroke-width="10"/>
+  <circle cx="600" cy="1448" r="180" fill="url(#nodeGrad)" stroke="#1E40AF" stroke-width="10"/>
+  <circle cx="1448" cy="1448" r="180" fill="url(#nodeGrad)" stroke="#1E40AF" stroke-width="10"/>
+  
+  <!-- 连接线 -->
+  <line x1="1024" y1="1024" x2="600" y2="600" stroke="#FFFFFF" stroke-width="12" stroke-opacity="0.6"/>
+  <line x1="1024" y1="1024" x2="1448" y2="600" stroke="#FFFFFF" stroke-width="12" stroke-opacity="0.6"/>
+  <line x1="1024" y1="1024" x2="600" y2="1448" stroke="#FFFFFF" stroke-width="12" stroke-opacity="0.6"/>
+  <line x1="1024" y1="1024" x2="1448" y2="1448" stroke="#FFFFFF" stroke-width="12" stroke-opacity="0.6"/>
+  
+  <!-- 中心图标：数据库符号 -->
+  <path d="M 1024 800 L 800 900 L 800 1148 L 1024 1248 L 1248 1148 L 1248 900 Z" 
+        fill="#3B82F6" stroke="#1E40AF" stroke-width="8"/>
+  <line x1="800" y1="1024" x2="1248" y2="1024" stroke="#1E40AF" stroke-width="6"/>
+</svg>
+

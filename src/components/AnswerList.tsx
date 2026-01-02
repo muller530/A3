@@ -1,8 +1,8 @@
 import { useState, useEffect } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
-import { listAnswers, loadFeishuConfig, getBitableTables, Answer, optimizeAnswerWithAI, reviewAnswerWithAI, checkAnswerRisk, updateAnswerToFeishu, saveAnswersCache, loadAnswersCache, getBitableRecord, AnswerRecord, getAnswersData, openExternalUrl } from "../lib/api";
-import { extractOptimizedAnswer, extractReviewResult, ReviewResult, getFeishuRecordId } from "../lib/utils";
+import { listAnswers, loadFeishuConfig, getBitableTables, Answer, optimizeAnswerWithAI, reviewAnswerWithAI, checkAnswerRisk, updateAnswerToFeishu, createAnswerToFeishu, saveAnswersCache, loadAnswersCache, getBitableRecord, AnswerRecord, getAnswersData, openExternalUrl, canSyncToday, saveLastSyncTimeForUser } from "../lib/api";
+import { extractOptimizedAnswer, extractReviewResult, ReviewResult, getFeishuRecordId, calculateAnswerMatchScore } from "../lib/utils";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
@@ -39,7 +39,11 @@ export default function AnswerList() {
   const [loadingProductInfo, setLoadingProductInfo] = useState(false); // 加载产品信息中
   const [productTableId, setProductTableId] = useState<string | null>(null); // 产品表格ID
   const [productInfoExpanded, setProductInfoExpanded] = useState(false); // 产品信息是否展开
-  const { role } = useAuth();
+  const [showAddQuestionDialog, setShowAddQuestionDialog] = useState(false); // 是否显示新增问题对话框
+  const [newQuestion, setNewQuestion] = useState(""); // 新问题内容
+  const [creatingQuestion, setCreatingQuestion] = useState(false); // 正在创建问题
+  const [matchScores, setMatchScores] = useState<Record<string, number>>({}); // 匹配度分数
+  const { role, currentUser } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -160,6 +164,29 @@ export default function AnswerList() {
       if (!config || !config.appToken) {
         return;
       }
+
+      // 检查是否为本地模式（没有 appId 和 appSecret）
+      const isLocalMode = !config.appId || !config.appSecret;
+      
+      if (isLocalMode) {
+        // 本地模式：只能使用配置中的表格ID，无法获取表格列表
+        if (config.tableId) {
+          setSelectedTableId(config.tableId);
+        }
+        
+        // 从配置中查找产品表格
+        if (config.tables && config.tables.length > 0) {
+          const productTableConfig = config.tables.find(
+            (t) => t.name === "products" || t.name.toLowerCase().includes("product")
+          );
+          if (productTableConfig) {
+            setProductTableId(productTableConfig.tableId);
+          }
+        }
+        return;
+      }
+
+      // 完整配置模式：可以获取表格列表
       const tablesList = await getBitableTables(config.appToken);
       
       // 如果还没有选中表格，尝试自动选择 Answers 表
@@ -232,6 +259,50 @@ export default function AnswerList() {
         return;
       }
 
+      // 检查是否为本地模式（没有 appId 和 appSecret）
+      const isLocalMode = !config.appId || !config.appSecret;
+      
+      if (isLocalMode) {
+        // 本地模式：只能使用缓存数据
+        const cache = loadAnswersCache(tableId);
+        if (cache && cache.data.length > 0) {
+          setAnswers(cache.data);
+          setLoadingState("success");
+          setLastSyncTime(cache.timestamp);
+          setErrorMessage("当前为本地模式，仅显示缓存数据。如需同步最新数据，请配置完整的飞书凭证（App ID 和 App Secret）");
+        } else {
+          setLoadingState("error");
+          setErrorMessage("本地模式下无缓存数据。请配置完整的飞书凭证（App ID 和 App Secret）以同步数据，或联系管理员获取数据");
+        }
+        return;
+      }
+
+      // 完整配置模式：可以同步数据
+      // 检查普通用户的同步频率限制（一天只能同步一次）
+      const userId = currentUser?.id || "default";
+      if (!canSyncToday(userId, role || null)) {
+        // 今天已经同步过，使用缓存数据
+        const cache = loadAnswersCache(tableId);
+        if (cache && cache.data.length > 0) {
+          setAnswers(cache.data);
+          setLoadingState("success");
+          setLastSyncTime(cache.timestamp);
+          const lastSyncDate = new Date(cache.timestamp);
+          const today = new Date();
+          if (lastSyncDate.getDate() === today.getDate() && 
+              lastSyncDate.getMonth() === today.getMonth() && 
+              lastSyncDate.getFullYear() === today.getFullYear()) {
+            setErrorMessage(`普通用户一天只能同步一次，今天已同步过（${lastSyncDate.toLocaleTimeString("zh-CN")}）。请明天再试或联系管理员。`);
+          } else {
+            setErrorMessage("普通用户一天只能同步一次，请明天再试或联系管理员。");
+          }
+        } else {
+          setLoadingState("error");
+          setErrorMessage("普通用户一天只能同步一次，且无缓存数据。请明天再试或联系管理员。");
+        }
+        return;
+      }
+
       // 调用后端 list_answers 命令
       const data = await listAnswers(config.appToken, tableId);
       setAnswers(data);
@@ -239,7 +310,13 @@ export default function AnswerList() {
       
       // 保存到本地缓存
       saveAnswersCache(tableId, data);
-      setLastSyncTime(Date.now());
+      const syncTime = Date.now();
+      setLastSyncTime(syncTime);
+      
+      // 保存普通用户的同步时间（用于限制一天只能同步一次）
+      if (role === "user") {
+        saveLastSyncTimeForUser(userId, syncTime);
+      }
       
       // 调试：输出字段信息到控制台
       if (data.length > 0 && data[0].raw_fields) {
@@ -263,6 +340,7 @@ export default function AnswerList() {
 
   const filterAnswers = () => {
     let filtered = [...answers];
+    const scores: Record<string, number> = {};
 
     // 默认过滤：状态=启用（除非开启显示所有模式）
     if (!showAll) {
@@ -284,18 +362,27 @@ export default function AnswerList() {
       });
     }
 
-    // 搜索过滤：问题、标准回答、对应产品
+    // 搜索过滤：问题、标准回答、对应产品，并计算匹配度
     if (searchTerm.trim()) {
-      const term = searchTerm.toLowerCase();
-      filtered = filtered.filter((answer) => {
-        return (
-          answer.question.toLowerCase().includes(term) ||
-          answer.standard_answer.toLowerCase().includes(term) ||
-          answer.product_name.toLowerCase().includes(term)
-        );
+      const term = searchTerm.trim();
+      
+      // 计算每个答案的匹配度
+      filtered.forEach((answer) => {
+        const score = calculateAnswerMatchScore(term, answer);
+        scores[answer.record_id] = score;
       });
+
+      // 按匹配度排序
+      filtered = filtered.sort((a, b) => {
+        const scoreA = scores[a.record_id] || 0;
+        const scoreB = scores[b.record_id] || 0;
+        return scoreB - scoreA;
+      });
+
+      // 匹配度信息已保存到 matchScores，UI 中会显示提示
     }
 
+    setMatchScores(scores);
     setFilteredAnswers(filtered);
   };
 
@@ -602,14 +689,75 @@ export default function AnswerList() {
     }
   };
 
+  // 创建新问题到飞书（所有用户都可以）
+  const handleCreateNewQuestion = async () => {
+    if (!newQuestion.trim()) {
+      setSubmitMessage("请输入问题内容");
+      return;
+    }
+
+    const config = loadFeishuConfig();
+    if (!config || !config.appToken) {
+      setSubmitMessage("未找到飞书配置，请先前往配置中心设置");
+      return;
+    }
+
+    const tableId = selectedTableId || config.tableId;
+    if (!tableId) {
+      setSubmitMessage("请先选择表格");
+      return;
+    }
+
+    // 检查是否为本地模式
+    const isLocalMode = !config.appId || !config.appSecret;
+    if (isLocalMode) {
+      setSubmitMessage("本地模式下无法创建问题，请配置完整的飞书凭证（App ID 和 App Secret）");
+      return;
+    }
+
+    setCreatingQuestion(true);
+    setSubmitMessage("");
+
+    try {
+      // 构建新记录的字段
+      const fields: Record<string, any> = {
+        "问题": newQuestion.trim(),
+        // 标准回答留空，等待后续填写
+        "标准回答": "",
+        // 状态设置为"待审核"或"未启用"
+        "状态": "待审核",
+      };
+
+      await createAnswerToFeishu(config.appToken, tableId, fields);
+      setSubmitMessage("问题已成功添加到飞书！");
+      setShowAddQuestionDialog(false);
+      setNewQuestion("");
+      
+      // 可选：自动同步一次以刷新列表（但受频率限制）
+      // await loadAnswersData();
+    } catch (error: any) {
+      setSubmitMessage(`创建失败: ${error.message || error}`);
+    } finally {
+      setCreatingQuestion(false);
+    }
+  };
+
   const handleSubmitToFeishu = async () => {
-    // 权限检查：只有管理员可以写回
+    // 权限检查：只有管理员可以写回（更新现有记录）
     if (role !== "admin") {
-      setSubmitMessage("权限不足：只有管理员可以写回飞书");
+      setSubmitMessage("权限不足：只有管理员可以更新现有记录到飞书");
       return;
     }
 
     if (!selectedAnswer) return;
+
+    // 检查是否为本地模式
+    const config = loadFeishuConfig();
+    const isLocalMode = !config || !config.appId || !config.appSecret;
+    if (isLocalMode) {
+      setSubmitMessage("本地模式下无法写回飞书，请配置完整的飞书凭证（App ID 和 App Secret）");
+      return;
+    }
 
     // 校验 feishu_record_id
     const feishuRecordId = getFeishuRecordId(selectedAnswer);
@@ -792,24 +940,42 @@ export default function AnswerList() {
                   />
                 </div>
               )}
-              <Button
-                onClick={loadAnswersData}
-                disabled={loadingState === "loading" || !selectedTableId}
-                variant="outline"
-                size="sm"
-              >
-                {loadingState === "loading" ? (
-                  <>
-                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                    同步中...
-                  </>
-                ) : (
-                  <>
-                    <RefreshCw className="w-4 h-4 mr-2" />
-                    同步数据
-                  </>
-                )}
-              </Button>
+              {(() => {
+                const config = loadFeishuConfig();
+                const isLocalMode = !config || !config.appId || !config.appSecret;
+                // 检查普通用户今天是否已经同步过
+                const userId = currentUser?.id || "default";
+                const canSync = canSyncToday(userId, role || null);
+                const isDisabled = loadingState === "loading" || isLocalMode || (!canSync && role === "user");
+                
+                return (
+                  <Button
+                    onClick={loadAnswersData}
+                    disabled={isDisabled}
+                    variant="outline"
+                    size="sm"
+                    title={
+                      isLocalMode 
+                        ? "本地模式下无法同步数据，请配置完整的飞书凭证（App ID 和 App Secret）"
+                        : !canSync && role === "user"
+                        ? "普通用户一天只能同步一次，今天已同步过，请明天再试"
+                        : ""
+                    }
+                  >
+                    {loadingState === "loading" ? (
+                      <>
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                        同步中...
+                      </>
+                    ) : (
+                      <>
+                        <RefreshCw className="w-4 h-4 mr-2" />
+                        {isLocalMode ? "本地模式" : !canSync && role === "user" ? "今日已同步" : "同步数据"}
+                      </>
+                    )}
+                  </Button>
+                );
+              })()}
             </div>
           </div>
           
@@ -848,15 +1014,22 @@ export default function AnswerList() {
               <div>
                 <CardTitle>知识库</CardTitle>
                 <CardDescription>
-                  {loadingState === "idle" && (
-                    <>
-                      {lastSyncTime ? (
-                        <>已加载缓存数据，点击"同步数据"获取最新数据</>
-                      ) : (
-                        <>点击"同步数据"按钮从飞书拉取最新数据</>
-                      )}
-                    </>
-                  )}
+                  {loadingState === "idle" && (() => {
+                    const config = loadFeishuConfig();
+                    const isLocalMode = !config || !config.appId || !config.appSecret;
+                    if (isLocalMode) {
+                      return <>本地模式：仅显示缓存数据，无法同步最新数据</>;
+                    }
+                    return (
+                      <>
+                        {lastSyncTime ? (
+                          <>已加载缓存数据，点击"同步数据"获取最新数据</>
+                        ) : (
+                          <>点击"同步数据"按钮从飞书拉取最新数据</>
+                        )}
+                      </>
+                    );
+                  })()}
                   {loadingState === "error" && '数据加载失败，请点击"同步数据"重试'}
                 </CardDescription>
               </div>
@@ -865,19 +1038,36 @@ export default function AnswerList() {
           <CardContent>
 
             {/* 初始态：提示用户同步数据 */}
-            {loadingState === "idle" && (
-              <div className="flex flex-col items-center justify-center py-12">
-                <RefreshCw className="w-12 h-12 text-gray-400 mb-4" />
-                <p className="text-gray-600 font-medium mb-2">尚未同步数据</p>
-                <p className="text-gray-500 text-sm text-center max-w-md mb-4">
-                  请点击右上角的"同步数据"按钮，从飞书多维表格拉取最新数据
-                </p>
-                <Button onClick={loadAnswersData}>
-                  <RefreshCw className="w-4 h-4 mr-2" />
-                  同步数据
-                </Button>
-              </div>
-            )}
+            {loadingState === "idle" && (() => {
+              const config = loadFeishuConfig();
+              const isLocalMode = !config || !config.appId || !config.appSecret;
+              return (
+                <div className="flex flex-col items-center justify-center py-12">
+                  <RefreshCw className="w-12 h-12 text-gray-400 mb-4" />
+                  <p className="text-gray-600 font-medium mb-2">尚未同步数据</p>
+                  {isLocalMode ? (
+                    <>
+                      <p className="text-gray-500 text-sm text-center max-w-md mb-4">
+                        当前为本地模式，只能使用缓存数据。如需同步最新数据，请前往设置页面配置完整的飞书凭证（App ID 和 App Secret）
+                      </p>
+                      <Button onClick={() => navigate("/settings?tab=feishu")} variant="outline">
+                        前往设置
+                      </Button>
+                    </>
+                  ) : (
+                    <>
+                      <p className="text-gray-500 text-sm text-center max-w-md mb-4">
+                        请点击右上角的"同步数据"按钮，从飞书多维表格拉取最新数据
+                      </p>
+                      <Button onClick={loadAnswersData}>
+                        <RefreshCw className="w-4 h-4 mr-2" />
+                        同步数据
+                      </Button>
+                    </>
+                  )}
+                </div>
+              );
+            })()}
 
             {/* 加载态 */}
             {loadingState === "loading" && (
@@ -906,23 +1096,55 @@ export default function AnswerList() {
               </div>
             )}
 
-            {/* 空态 */}
-            {loadingState === "success" && filteredAnswers.length === 0 && (
-              <div className="flex flex-col items-center justify-center py-12">
-                <FileText className="w-12 h-12 text-gray-400 mb-4" />
-                <p className="text-gray-600 font-medium mb-2">
-                  {answers.length === 0 ? "暂无数据" : "没有符合条件的答案"}
-                </p>
-                {answers.length === 0 ? (
-                  <p className="text-gray-500 text-sm text-center max-w-md">
-                    请确保飞书多维表格中有数据，且状态为"启用"
-                  </p>
-                ) : (
-                  <p className="text-gray-500 text-sm text-center max-w-md">
-                    请尝试调整搜索关键词
-                  </p>
-                )}
-              </div>
+            {/* 空态或低匹配度提示 */}
+            {loadingState === "success" && (
+              <>
+                {filteredAnswers.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-12">
+                    <FileText className="w-12 h-12 text-gray-400 mb-4" />
+                    <p className="text-gray-600 font-medium mb-2">
+                      {answers.length === 0 ? "暂无数据" : "没有符合条件的答案"}
+                    </p>
+                    {answers.length === 0 ? (
+                      <p className="text-gray-500 text-sm text-center max-w-md">
+                        请确保飞书多维表格中有数据，且状态为"启用"
+                      </p>
+                    ) : (
+                      <p className="text-gray-500 text-sm text-center max-w-md">
+                        请尝试调整搜索关键词
+                      </p>
+                    )}
+                  </div>
+                ) : searchTerm.trim() && filteredAnswers.length > 0 && (() => {
+                  const maxScore = Math.max(...filteredAnswers.map(a => matchScores[a.record_id] || 0));
+                  return maxScore < 70 && searchTerm.trim().length >= 3 ? (
+                    <div className="mb-4 p-4 bg-amber-50 border border-amber-200 rounded-lg">
+                      <div className="flex items-start gap-3">
+                        <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+                        <div className="flex-1">
+                          <p className="text-sm font-medium text-amber-800 mb-1">
+                            未找到匹配度高于70%的答案
+                          </p>
+                          <p className="text-xs text-amber-700 mb-3">
+                            最高匹配度：{maxScore.toFixed(1)}%
+                          </p>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => {
+                              setNewQuestion(searchTerm.trim());
+                              setShowAddQuestionDialog(true);
+                            }}
+                            className="border-amber-300 text-amber-700 hover:bg-amber-100"
+                          >
+                            新增这个问题到飞书
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  ) : null;
+                })()}
+              </>
             )}
 
             {/* 成功态：列表展示 */}
@@ -942,6 +1164,17 @@ export default function AnswerList() {
                           {answer.standard_answer !== "-" ? answer.standard_answer : "无标准回答"}
                         </p>
                         <div className="flex flex-wrap gap-2 mt-2">
+                          {searchTerm.trim() && matchScores[answer.record_id] !== undefined && (
+                            <span className={`text-xs px-2 py-1 rounded font-medium ${
+                              matchScores[answer.record_id] >= 70
+                                ? "bg-green-100 text-green-700"
+                                : matchScores[answer.record_id] >= 50
+                                ? "bg-yellow-100 text-yellow-700"
+                                : "bg-red-100 text-red-700"
+                            }`}>
+                              匹配度: {matchScores[answer.record_id].toFixed(1)}%
+                            </span>
+                          )}
                           <span className={`text-xs px-2 py-1 rounded ${
                             answer.enable_status.toLowerCase().trim() === "启用" ||
                             answer.enable_status.toLowerCase().trim() === "enable" ||
@@ -1864,6 +2097,121 @@ export default function AnswerList() {
                 )}
               </div>
             )}
+            </div>
+          </DialogContent>
+        </Dialog>
+
+        {/* 新增问题对话框 */}
+        <Dialog open={showAddQuestionDialog} onOpenChange={setShowAddQuestionDialog}>
+          <DialogContent className="max-w-3xl sm:max-w-3xl p-0">
+            <DialogHeader className="px-8 pt-8 pb-6 border-b">
+              <div className="flex items-center gap-4">
+                <div className="w-12 h-12 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center flex-shrink-0">
+                  <FileText className="w-6 h-6 text-white" />
+                </div>
+                <div>
+                  <DialogTitle className="text-2xl font-semibold text-gray-900">
+                    新增问题到飞书
+                  </DialogTitle>
+                  <p className="text-sm text-gray-500 mt-2">
+                    将新问题添加到知识库中
+                  </p>
+                </div>
+              </div>
+            </DialogHeader>
+            
+            <div className="px-8 py-6 space-y-6">
+              {/* 问题输入区域 */}
+              <div className="space-y-3">
+                <label className="text-base font-medium text-gray-700 flex items-center gap-2">
+                  问题内容
+                  <span className="text-red-500">*</span>
+                </label>
+                <div className="relative">
+                  <Input
+                    type="text"
+                    placeholder="请输入要新增的问题内容，例如：如何查询订单状态？"
+                    value={newQuestion}
+                    onChange={(e) => setNewQuestion(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && newQuestion.trim() && !creatingQuestion) {
+                        handleCreateNewQuestion();
+                      }
+                    }}
+                    className="w-full h-14 pl-5 pr-5 text-base border-2 border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 rounded-lg transition-all"
+                    autoFocus
+                  />
+                </div>
+                <p className="text-sm text-gray-500">
+                  支持输入中英文问题，建议问题描述清晰明确
+                </p>
+              </div>
+
+              {/* 提示信息卡片 */}
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-5">
+                <div className="flex items-start gap-4">
+                  <AlertCircle className="w-6 h-6 text-blue-600 flex-shrink-0 mt-0.5" />
+                  <div className="flex-1">
+                    <p className="text-base font-medium text-blue-900 mb-2">
+                      提示信息
+                    </p>
+                    <p className="text-sm text-blue-700 leading-relaxed">
+                      新增的问题将添加到飞书表格中，标准回答字段将留空，等待后续填写。创建成功后，您可以在下次同步时看到这条新问题。
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* 消息提示 */}
+              {submitMessage && (
+                <div className={`rounded-lg p-5 border flex items-start gap-4 ${
+                  submitMessage.includes("成功")
+                    ? "bg-green-50 border-green-200 text-green-800" 
+                    : "bg-red-50 border-red-200 text-red-800"
+                }`}>
+                  {submitMessage.includes("成功") ? (
+                    <CheckCircle2 className="w-6 h-6 flex-shrink-0 mt-0.5" />
+                  ) : (
+                    <AlertCircle className="w-6 h-6 flex-shrink-0 mt-0.5" />
+                  )}
+                  <p className="text-sm font-medium flex-1">
+                    {submitMessage}
+                  </p>
+                </div>
+              )}
+
+              {/* 操作按钮 */}
+              <div className="flex justify-end gap-4 pt-4 border-t">
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setShowAddQuestionDialog(false);
+                    setNewQuestion("");
+                    setSubmitMessage("");
+                  }}
+                  disabled={creatingQuestion}
+                  className="min-w-[110px] h-11 px-6"
+                >
+                  取消
+                </Button>
+                <Button
+                  onClick={handleCreateNewQuestion}
+                  disabled={!newQuestion.trim() || creatingQuestion}
+                  className="min-w-[140px] h-11 px-6 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white shadow-md hover:shadow-lg transition-all"
+                >
+                  {creatingQuestion ? (
+                    <>
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      创建中...
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="w-4 h-4 mr-2" />
+                      创建问题
+                    </>
+                  )}
+                </Button>
+              </div>
             </div>
           </DialogContent>
         </Dialog>

@@ -1,6 +1,5 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { useAuth } from "../contexts/AuthContext";
 import { saveFeishuConfig, loadFeishuConfig, testConnection, TableConfig, setAiConfig, loadAiConfig, testAiConnection } from "../lib/api";
 import { extractBitableInfo } from "../lib/utils";
 import { Button } from "./ui/button";
@@ -65,7 +64,6 @@ export default function Config() {
     message: string;
   } | null>(null);
   
-  const { role } = useAuth();
   const navigate = useNavigate();
 
   // 从本地存储加载已保存的配置
@@ -116,7 +114,7 @@ export default function Config() {
         setAiApiKey(config.api_key);
         setAiBaseUrl(config.base_url);
         setAiModelId(config.model_id);
-        setAiRequestTimeout(config.request_timeout);
+        setAiRequestTimeout(config.request_timeout || 60);
       }
     }).catch((error) => {
       console.error("加载 AI 配置失败:", error);
