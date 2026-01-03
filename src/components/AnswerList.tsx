@@ -1217,6 +1217,7 @@ export default function AnswerList() {
             )}
           </CardContent>
         </Card>
+        </div>
 
         {/* 详情对话框 */}
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
@@ -2216,7 +2217,6 @@ export default function AnswerList() {
           </DialogContent>
         </Dialog>
       </div>
-    </div>
     </div>
   );
 }
